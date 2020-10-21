@@ -18,8 +18,8 @@ N_ACTIONS = 15
 MEMORY_CAPACITY = 1000
 EPSILON = 0.9 
 γ = 0.9
-αw = 1
-αθ = 1
+αw = 1e-3
+αθ = 1e-3
 TARGET_REPLACE_ITER = 100
 STATES_SHAPE = [3,15,15,3]
 LR = 1e-3
@@ -67,7 +67,7 @@ class QNet(nn.Module):
         q = self.tanh(q)
         return q
 
-
+# Deterministic Actor Critic
 class DAC(Policy):
     def __init__(self, env, states, actions):
         super(DAC, self).__init__(states, actions)
@@ -113,15 +113,15 @@ class DAC(Policy):
         Q_ = self.Q(st_,at_)
         
         # δ_t = r_t + γ * Q(s_{t+1}, a_{t+1}) - Q(s_t, a_t)
-        δt = rt + γ * Q_[0] - Q[0]
+        δt = rt - 1 + γ * Q_[0] - Q[0]
         
         self.Q.zero_grad()
         Q.backward()
         for w in self.Q.parameters():
             # w_{t+1} = w_t + α_w * δ_t * ∇_w Q(s_t, a_t)
             w.data = w.data + αw * δt * w.grad
-        
-        # ∇_a Q(s_t, a_t)|_{a=μ(s)}
+
+        # ∇_a Q(s_t, a_t)|_env{a=μ(s)}
         ΔaQ = at2.grad
 
         self.μ.zero_grad()
@@ -132,7 +132,7 @@ class DAC(Policy):
         return rt
 
 if __name__=="__main__":
-    sim = prl.simulators.Bullet()
+    sim = prl.simulators.Bullet(render=False)
     world = prl.worlds.BasicWorld(sim)
     box = world.load_box(position=(0.5,0,0),dimensions=(0.1,0.1,0.1),mass=0.1,color=[0,0,1,1])
     manipulator = world.load_robot('wam')
@@ -141,12 +141,17 @@ if __name__=="__main__":
     reward = TerminalReward(HasPickedAndPlacedCondition(manipulator,box,world))
     env = Env(world, states, rewards=reward,actions=action)
     
-    
-    num_steps=10000
     env.reset()
-    env.render()
+    env.hide()
     dac = DAC(env, states, action)
-    for t in count():
-        if t>=num_steps:
+    num_episodes = 1000
+    t_episode = 1000
+    for i in count():
+        if i>=num_episodes:
             break
-        print(dac.learn())
+        print("Episode {}".format(i))
+        manipulator.reset_joint_states()
+        cnt = 0
+        for t in range(t_episode):
+            cnt += dac.learn()
+        print("Total reward: ", cnt)
