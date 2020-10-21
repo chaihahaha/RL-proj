@@ -7,16 +7,17 @@ from itertools import count
 from pyrobolearn.envs import Env
 from pyrobolearn.policies import Policy
 from pyrobolearn.rewards.terminal_rewards import TerminalReward
+from pyrobolearn.terminal_conditions import LinkPositionCondition, TerminalCondition
 from pyrobolearn.states.body_states import PositionState, VelocityState
 from pyrobolearn.states import BasePositionState, JointPositionState, JointVelocityState
 from pyrobolearn.actions.robot_actions.joint_actions import JointPositionAction
 from pyrobolearn.tasks.reinforcement import RLTask
-from pyrobolearn.terminal_conditions.terminal_condition import TerminalCondition
+
 
 N_STATES = 36
 N_ACTIONS = 15
 MEMORY_CAPACITY = 1000
-EPSILON = 0.9 
+EPSILON = 0.9
 γ = 0.9
 αw = 1e-3
 αθ = 1e-3
@@ -24,7 +25,8 @@ TARGET_REPLACE_ITER = 100
 STATES_SHAPE = [3,15,15,3]
 LR = 1e-3
 BATCH_SIZE = 20
-class HasPickedAndPlacedCondition(TerminalCondition):
+
+class HasPickedAndLiftedCondition(TerminalCondition):
     def __init__(self, robot, box, world):
         self.robot = robot
         self.box = box
@@ -32,10 +34,21 @@ class HasPickedAndPlacedCondition(TerminalCondition):
     def check(self):
         x,y,z = self.world.get_body_position(self.box)
         return z>0.5
+        
+class HasTouchedCondition(TerminalCondition):
+    def __init__(self, robot, box, world):
+        self.robot = robot
+        self.box = box
+        self.world = world
+    def check(self):
+        end_effector = self.robot.get_end_effector_ids()[-1]
+        dx,dy,dz = self.robot.get_link_positions(end_effector,self.box)
+        return dx**2 + dy**2 + dz**2 <100000
 
 class Net(nn.Module):
-    def __init__(self):
+    def __init__(self, bounds):
         super(Net, self).__init__()
+        self.bounds = bounds
         self.fc1 = nn.Linear(N_STATES, 50)
         self.fc1.weight.data.normal_(0, 0.1)   # initialization
         self.out = nn.Linear(50, N_ACTIONS)
@@ -45,8 +58,14 @@ class Net(nn.Module):
     def forward(self, x):
         x = self.fc1(x)
         x = F.relu(x)
-        actions_value = 4 * self.tanh(self.out(x))
-        return actions_value
+        x = self.out(x)
+        actions = []
+        for a in range(N_ACTIONS):
+            actions.append(self.clip(x[a],self.bounds[a,0],self.bounds[a,1]))
+        return torch.stack(actions,axis=0).view(N_ACTIONS)
+        
+    def clip(self, x, x_min, x_max):
+        return x_min + (x_max-x_min)*(self.tanh(x)+1)/2
         
 class QNet(nn.Module):
     def __init__(self):
@@ -75,7 +94,7 @@ class DAC(Policy):
         self.states = states
         self.actions = actions
         self.action_data = None
-        self.μ, self.Q = Net(), QNet()
+        self.μ, self.Q = Net(bounds), QNet()
 
     def learn(self):
         # get state $s_t$
@@ -101,7 +120,7 @@ class DAC(Policy):
         
         # step in environment to get next state $s_{t+1}$, reward $r_t$
         st_, rt, done, info = self.env.step(a_env)
-        
+        manipulator.get_end_effector_ids()[-1]
         # cast to tensor
         st_ = torch.tensor(st_, dtype=torch.float)
         
@@ -113,14 +132,14 @@ class DAC(Policy):
         Q_ = self.Q(st_,at_)
         
         # δ_t = r_t + γ * Q(s_{t+1}, a_{t+1}) - Q(s_t, a_t)
-        δt = rt - 1 + γ * Q_[0] - Q[0]
+        δt = rt + γ * Q_[0] - Q[0]
         
         self.Q.zero_grad()
         Q.backward()
         for w in self.Q.parameters():
             # w_{t+1} = w_t + α_w * δ_t * ∇_w Q(s_t, a_t)
             w.data = w.data + αw * δt * w.grad
-
+        #print(sum([torch.sum(i) for i in self.μ.parameters()]))
         # ∇_a Q(s_t, a_t)|_{a=μ(s)}
         ΔaQ = at2.grad
 
@@ -132,13 +151,14 @@ class DAC(Policy):
         return rt
 
 if __name__=="__main__":
-    sim = prl.simulators.Bullet(render=False)
+    sim = prl.simulators.Bullet(render=True)
     world = prl.worlds.BasicWorld(sim)
     box = world.load_box(position=(0.5,0,0),dimensions=(0.1,0.1,0.1),mass=0.1,color=[0,0,1,1])
     manipulator = world.load_robot('wam')
     states = BasePositionState(manipulator) + JointPositionState(manipulator) + JointVelocityState(manipulator) + PositionState(box,world)
     action = JointPositionAction(manipulator)
-    reward = TerminalReward(HasPickedAndPlacedCondition(manipulator,box,world))
+    bounds = action.bounds()
+    reward = TerminalReward(terminal_conditions=LinkPositionCondition(manipulator, link_id=manipulator.get_end_effector_ids()[-1],wrt_link_id=box,bounds=(-1, 1), all=True,out=False, stay=True)     ,subreward=-1,final_reward=0)
     env = Env(world, states, rewards=reward,actions=action)
     
     env.reset()
