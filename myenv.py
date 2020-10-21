@@ -51,13 +51,18 @@ class Net(nn.Module):
         self.bounds = bounds
         self.fc1 = nn.Linear(N_STATES, 50)
         self.fc1.weight.data.normal_(0, 0.1)   # initialization
-        self.out = nn.Linear(50, N_ACTIONS)
+        self.fc2 = nn.Linear(50, 100)
+        self.fc2.weight.data.normal_(0, 0.1)   # initialization
+        self.out = nn.Linear(100, N_ACTIONS)
         self.out.weight.data.normal_(0, 0.1)   # initialization
         self.tanh = nn.Tanh()
+        self.act = nn.LeakyReLU(0.2, inplace=True)
 
     def forward(self, x):
         x = self.fc1(x)
-        x = F.relu(x)
+        x = self.act(x)
+        x = self.fc2(x)
+        x = self.act(x)
         x = self.out(x)
         actions = []
         for a in range(N_ACTIONS):
@@ -71,20 +76,23 @@ class QNet(nn.Module):
     def __init__(self):
         super(QNet, self).__init__()
         self.fc1 = nn.Linear(N_STATES, 50)
-        self.fc2 = nn.Linear(N_ACTIONS, 50)
         self.fc1.weight.data.normal_(0, 0.1)   # initialization
+        self.fc2 = nn.Linear(N_ACTIONS, 50)
         self.fc2.weight.data.normal_(0, 0.1)   # initialization
-        self.out = nn.Linear(100, 1)
-        self.out.weight.data.normal_(0, 0.1)   # initialization
+        self.out1 = nn.Linear(100, 100)
+        self.out1.weight.data.normal_(0, 0.1)   # initialization
+        self.out2 = nn.Linear(100, 1)
+        self.out2.weight.data.normal_(0, 0.1)   # initialization
         self.tanh = nn.Tanh()
+        self.act = nn.LeakyReLU(0.2, inplace=True)
 
     def forward(self, x1, x2):
-        x1 = self.fc1(x1)
-        x2 = self.fc2(x2)
-        x = F.relu(torch.stack([x1,x2],1).view(-1,100))
-        q = self.out(x)
-        q = self.tanh(q)
-        return q
+        x1 = self.act(self.fc1(x1))
+        x2 = self.act(self.fc2(x2))
+        x = self.act(torch.stack([x1,x2],1).view(-1,100))
+        x = self.act(self.out1(x))
+        x = self.act(self.out2(x))
+        return x
 
 # Deterministic Actor Critic
 class DAC(Policy):
