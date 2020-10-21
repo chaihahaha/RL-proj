@@ -121,7 +121,7 @@ class DAC(Policy):
             # w_{t+1} = w_t + α_w * δ_t * ∇_w Q(s_t, a_t)
             w.data = w.data + αw * δt * w.grad
 
-        # ∇_a Q(s_t, a_t)|_env{a=μ(s)}
+        # ∇_a Q(s_t, a_t)|_{a=μ(s)}
         ΔaQ = at2.grad
 
         self.μ.zero_grad()
@@ -142,7 +142,6 @@ if __name__=="__main__":
     env = Env(world, states, rewards=reward,actions=action)
     
     env.reset()
-    env.hide()
     dac = DAC(env, states, action)
     num_episodes = 1000
     t_episode = 1000
