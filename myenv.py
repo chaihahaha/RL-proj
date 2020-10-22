@@ -36,20 +36,21 @@ class HasPickedAndLiftedCondition(TerminalCondition):
         return z>0.5
         
 class HasTouchedCondition(TerminalCondition):
-    def __init__(self, robot, box, world):
+    def __init__(self, robot, box, world, radius):
         self.robot = robot
         self.box = box
         self.world = world
+        self.radius = radius
     def check(self):
         end_effector = self.robot.get_end_effector_ids()[-1]
         x1,y1,z1 = self.robot.get_link_world_positions(end_effector)
         x2,y2,z2 = self.world.get_body_position(box)
         dx,dy,dz = x1-x2,y1-y2,z1-z2
-        return dx**2 + dy**2 + dz**2 <0.25
+        return dx**2 + dy**2 + dz**2 <self.radius**2
 
-class Net(nn.Module):
+class μNet(nn.Module):
     def __init__(self, bounds):
-        super(Net, self).__init__()
+        super(μNet, self).__init__()
         self.bounds = bounds
         self.fc1 = nn.Linear(N_STATES, 50)
         self.fc1.weight.data.normal_(0, 0.1)   # initialization
@@ -97,15 +98,15 @@ class QNet(nn.Module):
         return x
 
 # Deterministic Actor Critic
-class DAC(Policy):
+class DDPG_AC(Policy):
     def __init__(self, env, states, actions, device):
-        super(DAC, self).__init__(states, actions)
+        super(DDPG_AC, self).__init__(states, actions)
         self.env = env
         self.states = states
         self.actions = actions
         self.action_data = None
         self.device = device
-        self.μ, self.Q = Net(bounds), QNet()
+        self.μ, self.Q = μNet(bounds), QNet()
         self.μ.to(device)
         self.Q.to(device)
 
@@ -162,7 +163,10 @@ class DAC(Policy):
         for θ in self.μ.parameters():
             # θ_{t+1} = θ_t + α_θ * ∇_θ μ(s_t) ∇_a Q
             θ.data = θ.data + αθ * θ.grad
-        return rt
+        return rt, done
+
+def success(reward):
+    return reward >= 0
 
 if __name__=="__main__":
     sim = prl.simulators.Bullet(render=True)
@@ -172,23 +176,25 @@ if __name__=="__main__":
     states = BasePositionState(manipulator) + JointPositionState(manipulator) + JointVelocityState(manipulator) + PositionState(box,world)
     action = JointPositionAction(manipulator)
     bounds = action.bounds()
-    reward = TerminalReward(HasTouchedCondition(manipulator,box,world),subreward=-1,final_reward=0)
-    env = Env(world, states, rewards=reward,actions=action)
+    r_cond = HasTouchedCondition(manipulator,box,world,0.5)
+    t_cond = HasTouchedCondition(manipulator,box,world,0.45)
+    reward = TerminalReward(r_cond,subreward=-1,final_reward=0)
+    env = Env(world, states, rewards=reward,actions=action,terminal_conditions=t_cond)
     
     env.reset()
-    dac = DAC(env, states, action, "cuda")
+    ddpg = DDPG_AC(env, states, action, "cuda")
     num_episodes = 1000
     t_episode = 200
-    for i in count():
-        if i>=num_episodes:
-            break
-        print("Episode {}".format(i))
-        manipulator.reset_joint_states(np.random.uniform(-3,3,(15)))
+    n_success = 0
+    for i in range(num_episodes):
+        manipulator.reset_joint_states(np.random.uniform(-1,1,(15)))
         world.move_object(box,[np.random.uniform(-1,1),np.random.uniform(-1,1),0.2])
-        cnt = 0
         for t in range(t_episode):
-            cnt += dac.learn()
-        print("Total reward: ", cnt)
+            reward, done = ddpg.learn()
+            if done:
+                break
+        n_success += 1 if success(reward) else 0
+        print("Episode {}\tSuccess rate: {:.4f}\t".format(i,n_success/(i+1)), "SUCCESS" if success(reward) else "FAIL")
 #    for i in count():
 #        obs,reward,done,info = env.step()
 #        print(reward)
