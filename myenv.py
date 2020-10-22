@@ -42,8 +42,10 @@ class HasTouchedCondition(TerminalCondition):
         self.world = world
     def check(self):
         end_effector = self.robot.get_end_effector_ids()[-1]
-        dx,dy,dz = self.robot.get_link_positions(end_effector,self.box)
-        return dx**2 + dy**2 + dz**2 <100000
+        x1,y1,z1 = self.robot.get_link_world_positions(end_effector)
+        x2,y2,z2 = self.world.get_body_position(box)
+        dx,dy,dz = x1-x2,y1-y2,z1-z2
+        return dx**2 + dy**2 + dz**2 <0.25
 
 class Net(nn.Module):
     def __init__(self, bounds):
@@ -166,7 +168,7 @@ if __name__=="__main__":
     states = BasePositionState(manipulator) + JointPositionState(manipulator) + JointVelocityState(manipulator) + PositionState(box,world)
     action = JointPositionAction(manipulator)
     bounds = action.bounds()
-    reward = TerminalReward(terminal_conditions=LinkPositionCondition(manipulator, link_id=manipulator.get_end_effector_ids()[-1],wrt_link_id=box,bounds=(-1, 1), all=True,out=False, stay=True)     ,subreward=-1,final_reward=0)
+    reward = TerminalReward(HasTouchedCondition(manipulator,box,world),subreward=-1,final_reward=0)
     env = Env(world, states, rewards=reward,actions=action)
     
     env.reset()
@@ -182,3 +184,6 @@ if __name__=="__main__":
         for t in range(t_episode):
             cnt += dac.learn()
         print("Total reward: ", cnt)
+#    for i in count():
+#        obs,reward,done,info = env.step()
+#        print(reward)
