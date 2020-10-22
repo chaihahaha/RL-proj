@@ -98,18 +98,21 @@ class QNet(nn.Module):
 
 # Deterministic Actor Critic
 class DAC(Policy):
-    def __init__(self, env, states, actions):
+    def __init__(self, env, states, actions, device):
         super(DAC, self).__init__(states, actions)
         self.env = env
         self.states = states
         self.actions = actions
         self.action_data = None
+        self.device = device
         self.μ, self.Q = Net(bounds), QNet()
+        self.μ.to(device)
+        self.Q.to(device)
 
     def learn(self):
         # get state $s_t$
         st = self.states.vec_data
-        st = torch.tensor(st, requires_grad=True, dtype=torch.float)
+        st = torch.tensor(st, requires_grad=True, dtype=torch.float,device=self.device)
         
         # get action $a_t$ with policy μ and $s_t$
         at = self.μ(st)
@@ -120,7 +123,7 @@ class DAC(Policy):
         
         # ε-greedy
         if np.random.uniform() < EPSILON:
-            a_env = at.data.numpy()
+            a_env = at.data.cpu().numpy()
         else:
             a_env = self.env.action.space.sample()
 
@@ -132,7 +135,7 @@ class DAC(Policy):
         st_, rt, done, info = self.env.step(a_env)
         manipulator.get_end_effector_ids()[-1]
         # cast to tensor
-        st_ = torch.tensor(st_, dtype=torch.float)
+        st_ = torch.tensor(st_, dtype=torch.float,device=self.device)
         
         # get action $a_{t+1}$ with policy μ and $s_{t+1}$
         at_ = self.μ(st_)
@@ -140,6 +143,7 @@ class DAC(Policy):
         # get action values Q and Q_
         Q = self.Q(st,at2)
         Q_ = self.Q(st_,at_)
+        #print(Q,Q_)
         
         # δ_t = r_t + γ * Q(s_{t+1}, a_{t+1}) - Q(s_t, a_t)
         δt = rt + γ * Q_[0] - Q[0]
@@ -163,7 +167,7 @@ class DAC(Policy):
 if __name__=="__main__":
     sim = prl.simulators.Bullet(render=True)
     world = prl.worlds.BasicWorld(sim)
-    box = world.load_box(position=(0.5,0,0),dimensions=(0.1,0.1,0.1),mass=0.1,color=[0,0,1,1])
+    box = world.load_box(position=(0.5,0,0.2),dimensions=(0.1,0.1,0.1),mass=0.1,color=[0,0,1,1])
     manipulator = world.load_robot('wam')
     states = BasePositionState(manipulator) + JointPositionState(manipulator) + JointVelocityState(manipulator) + PositionState(box,world)
     action = JointPositionAction(manipulator)
@@ -172,14 +176,15 @@ if __name__=="__main__":
     env = Env(world, states, rewards=reward,actions=action)
     
     env.reset()
-    dac = DAC(env, states, action)
+    dac = DAC(env, states, action, "cuda")
     num_episodes = 1000
-    t_episode = 1000
+    t_episode = 200
     for i in count():
         if i>=num_episodes:
             break
         print("Episode {}".format(i))
-        manipulator.reset_joint_states()
+        manipulator.reset_joint_states(np.random.uniform(-3,3,(15)))
+        world.move_object(box,[np.random.uniform(-1,1),np.random.uniform(-1,1),0.2])
         cnt = 0
         for t in range(t_episode):
             cnt += dac.learn()
