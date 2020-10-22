@@ -109,6 +109,7 @@ class DDPG_AC(Policy):
         self.μ, self.Q = μNet(bounds), QNet()
         self.μ.to(device)
         self.Q.to(device)
+        self.memory = []
 
     def learn(self):
         # get state $s_t$
@@ -163,6 +164,9 @@ class DDPG_AC(Policy):
         for θ in self.μ.parameters():
             # θ_{t+1} = θ_t + α_θ * ∇_θ μ(s_t) ∇_a Q
             θ.data = θ.data + αθ * θ.grad
+            
+        # keep (st, at, st_, at_) in memory
+        #self.memory.append((st, at, st_, at_))
         return rt, done
 
 def success(reward):
@@ -184,7 +188,8 @@ if __name__=="__main__":
     env.reset()
     ddpg = DDPG_AC(env, states, action, "cuda")
     num_episodes = 1000
-    t_episode = 200
+    t_episode = 100
+    n_samples = 100
     n_success = 0
     for i in range(num_episodes):
         manipulator.reset_joint_states(np.random.uniform(-1,1,(15)))
@@ -193,8 +198,11 @@ if __name__=="__main__":
             reward, done = ddpg.learn()
             if done:
                 break
+        if i%n_samples==0 and i>0:
+            print("Statistics {}-{}\tSuccess rate: {:.4f}".format(i-n_samples,i,n_success/n_samples))
+            n_success = 0
         n_success += 1 if success(reward) else 0
-        print("Episode {}\tSuccess rate: {:.4f}\t".format(i,n_success/(i+1)), "SUCCESS" if success(reward) else "FAIL")
+        print("SUCCESS" if success(reward) else "FAIL")
 #    for i in count():
 #        obs,reward,done,info = env.step()
 #        print(reward)
