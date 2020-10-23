@@ -28,6 +28,7 @@ BATCH_SIZE = 100
 TRAIN_FREQ = 100
 TARGET_REPLACE_ITER = TRAIN_FREQ * 4
 tau = 0.5
+t_episode = 100
 
 class HasPickedAndLiftedCondition(TerminalCondition):
     def __init__(self, robot, box, world):
@@ -152,8 +153,9 @@ class ACNet(nn.Module):
 
 # Deterministic Actor Critic
 class DDPG_AC(Policy):
-    def __init__(self, env, states, actions, device):
+    def __init__(self, env, states, actions,robot, device):
         super(DDPG_AC, self).__init__(states, actions)
+        self.robot = robot
         self.env = env
         self.states = states
         self.actions = actions
@@ -171,7 +173,7 @@ class DDPG_AC(Policy):
         self.memory = torch.zeros((MEMORY_CAPACITY,N_STATES*2+N_ACTIONS+1),device=self.device)
         self.cnt = 0
 
-    def learn(self):
+    def learn(self, timeout):
         # get state $s_t$
         st = self.states.vec_data
         st = torch.tensor(st, requires_grad=False, dtype=torch.float,device=self.device)
@@ -203,11 +205,53 @@ class DDPG_AC(Policy):
             right = self.cnt+1 if self.cnt<MEMORY_CAPACITY else MEMORY_CAPACITY
             s = self.memory[:right,:N_STATES]
             a = self.memory[:right,N_STATES:N_STATES+N_ACTIONS]
-            r = self.memory[:right,-N_STATES-1] 
+            r = self.memory[:right,-N_STATES-1]
             s_ = self.memory[:right,-N_STATES:]
             random_index = np.random.choice(right, BATCH_SIZE)
             si,ai,ri,si_ = s[random_index], a[random_index], r[random_index], s_[random_index]
             
+            self.train(si,ai,ri,si_)
+        
+        # update target network
+        if  (self.cnt+1) % TARGET_REPLACE_ITER == 0:
+            # update target network
+            p = self.ac.named_parameters()
+            p_tar = self.ac_tar.named_parameters()
+            d_tar = dict(p_tar)
+            for name, param in p:
+                d_tar[name].data = tau*param.data + (1-tau) * d_tar[name].data
+        
+        # HER replace goal
+        if timeout and (not done):
+            right = (self.cnt + 1) % MEMORY_CAPACITY 
+            left = right-t_episode
+            recall_epi = torch.zeros((t_episode, self.memory.shape[1]))
+            mem = self.memory.detach()
+            
+            if left<0:
+                recall_epi[left:,:] = mem[left:,:]
+                if right != 0:
+                    recall_epi[:right,:] = mem[:right,:]
+            else:
+                recall_epi = mem[left:right]
+                
+            # replace goal pos with end effector pos
+            s = recall_epi[:,:N_STATES]
+            a = recall_epi[:,N_STATES:N_STATES+N_ACTIONS]
+            r = recall_epi[:,-N_STATES-1]
+            s_ = recall_epi[:,-N_STATES:]
+            end_effector = self.robot.get_end_effector_ids()[-1]
+            x1,y1,z1 = self.robot.get_link_world_positions(end_effector)
+            s[:,-3:] = torch.tensor([[x1,y1,z1]])
+            s_[:,-3:] = torch.tensor([[x1,y1,z1]])
+            r[-1] = 0.
+            
+            self.train(s,a,r,s_)
+            
+        self.cnt += 1
+        return rt, done
+        
+    def train(self, si, ai, ri, si_):
             Q = self.ac.Q(si,ai)
             ai_ = self.ac_tar.μ(si_)
             Q_ = self.ac_tar.Q(si_,ai_).detach()
@@ -224,18 +268,6 @@ class DDPG_AC(Policy):
             loss2.backward()
             self.optimμ.step()
             self.optimμ.zero_grad()
-        
-        # update target network
-        if  (self.cnt+1) % TARGET_REPLACE_ITER == 0:
-            # update target network
-            p = self.ac.named_parameters()
-            p_tar = self.ac_tar.named_parameters()
-            d_tar = dict(p_tar)
-            for name, param in p:
-                d_tar[name].data = tau*param.data + (1-tau) * d_tar[name].data
-        
-        self.cnt += 1
-        return rt, done
     
     def save(self, filename):
         torch.save({'net':self.ac.state_dict()}, filename)
@@ -262,10 +294,10 @@ if __name__=="__main__":
     env = Env(world, states, rewards=reward,actions=action,terminal_conditions=t_cond)
     
     env.reset()
-    ddpg = DDPG_AC(env, states, action, "cuda")
+    ddpg = DDPG_AC(env, states, action,manipulator, "cpu")
     num_episodes = 30000
     save_freq = 200
-    t_episode = 100
+    
     n_samples = 100
     n_success = 0
     s_reward = 0
@@ -277,7 +309,8 @@ if __name__=="__main__":
         
         # run an episode
         for t in range(t_episode):
-            reward, done = ddpg.learn()
+            timeout = t==t_episode-1
+            reward, done = ddpg.learn(timeout)
             if done:
                 break
         n_success += 1 if done else 0
