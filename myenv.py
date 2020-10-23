@@ -12,6 +12,7 @@ from pyrobolearn.states.body_states import PositionState, VelocityState
 from pyrobolearn.states import BasePositionState, JointPositionState, JointVelocityState
 from pyrobolearn.actions.robot_actions.joint_actions import JointPositionAction
 from pyrobolearn.tasks.reinforcement import RLTask
+from pyrobolearn.rewards.reward import Reward
 
 
 N_STATES = 36
@@ -44,10 +45,26 @@ class HasTouchedCondition(TerminalCondition):
     def check(self):
         end_effector = self.robot.get_end_effector_ids()[-1]
         x1,y1,z1 = self.robot.get_link_world_positions(end_effector)
-        x2,y2,z2 = self.world.get_body_position(box)
+        x2,y2,z2 = self.world.get_body_position(self.box)
         dx,dy,dz = x1-x2,y1-y2,z1-z2
-        return dx**2 + dy**2 + dz**2 <self.radius**2
-
+        return dx**2 + dy**2 + dz**2 <=self.radius**2
+        
+class ApproachBoxReward(Reward):
+    def __init__(self, robot, box, world, range=(-np.infty,0)):
+        self.robot = robot
+        self.box = box
+        self.world = world
+        self.range = range
+        
+    def _compute(self):
+        """Compute the reward."""
+        end_effector = self.robot.get_end_effector_ids()[-1]
+        x1,y1,z1 = self.robot.get_link_world_positions(end_effector)
+        x2,y2,z2 = self.world.get_body_position(self.box)
+        dx,dy,dz = x1-x2,y1-y2,z1-z2
+        self.value = -(dx**2+dy**2+dz**2)**0.5
+        return self.value
+        
 class μNet(nn.Module):
     def __init__(self, bounds):
         super(μNet, self).__init__()
@@ -170,10 +187,10 @@ class DDPG_AC(Policy):
         return rt, done
 
 def success(reward):
-    return reward >= 0
+    return reward >= -0.5
 
 if __name__=="__main__":
-    sim = prl.simulators.Bullet(render=True)
+    sim = prl.simulators.Bullet(render=False)
     world = prl.worlds.BasicWorld(sim)
     box = world.load_box(position=(0.5,0,0.2),dimensions=(0.1,0.1,0.1),mass=0.1,color=[0,0,1,1])
     manipulator = world.load_robot('wam')
@@ -181,8 +198,9 @@ if __name__=="__main__":
     action = JointPositionAction(manipulator)
     bounds = action.bounds()
     r_cond = HasTouchedCondition(manipulator,box,world,0.5)
-    t_cond = HasTouchedCondition(manipulator,box,world,0.45)
-    reward = TerminalReward(r_cond,subreward=-1,final_reward=0)
+    t_cond = HasTouchedCondition(manipulator,box,world,0.5)
+    #reward = TerminalReward(r_cond,subreward=-1,final_reward=0)
+    reward = ApproachBoxReward(manipulator,box,world)
     env = Env(world, states, rewards=reward,actions=action,terminal_conditions=t_cond)
     
     env.reset()
@@ -192,17 +210,22 @@ if __name__=="__main__":
     n_samples = 100
     n_success = 0
     for i in range(num_episodes):
+        # randomly reset robot joint and box position
         manipulator.reset_joint_states(np.random.uniform(-1,1,(15)))
         world.move_object(box,[np.random.uniform(-1,1),np.random.uniform(-1,1),0.2])
+        
+        # run an episode
         for t in range(t_episode):
             reward, done = ddpg.learn()
             if done:
                 break
+        
+        # collect statistics of #n_samples results
         if i%n_samples==0 and i>0:
-            print("Statistics {}-{}\tSuccess rate: {:.4f}".format(i-n_samples,i,n_success/n_samples))
+            print("Statistics {}-{}\tSuccess rate: {:.4f}".format(i-n_samples,i,n_success/n_samples),flush=True)
             n_success = 0
-        n_success += 1 if success(reward) else 0
-        print("SUCCESS" if success(reward) else "FAIL")
+        n_success += 1 if done else 0
+        print("SUCCESS" if done else "FAIL",flush=True)
 #    for i in count():
 #        obs,reward,done,info = env.step()
 #        print(reward)
