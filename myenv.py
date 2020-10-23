@@ -86,20 +86,20 @@ class μNet(nn.Module):
         self.act = nn.LeakyReLU(0.2, inplace=False)
 
     def forward(self, x):
-        x = self.fc1(x)
-        x = self.act(x)
-        x = self.fc2(x)
-        x = self.act(x)
-        x = self.fc3(x)
-        x = self.act(x)
-        x = self.fc4(x)
-        x = self.act(x)
-        x = self.fc5(x)
-        x = self.act(x)
-        x = self.out(x)
+        x1 = self.fc1(x)
+        x1 = self.act(x1)
+        x2 = self.fc2(x1)
+        x2 = self.act(x2)
+        x3 = self.fc3(x2)
+        x3 = self.act(x3)
+        x4 = self.fc4(x3)
+        x4 = self.act(x4)
+        x5 = self.fc5(x4)
+        x5 = self.act(x5)
+        x6 = self.out(x5)
         actions = []
         for a in range(N_ACTIONS):
-            actions.append(self.clip(x[:,a],self.bounds[a,0],self.bounds[a,1]))
+            actions.append(self.clip(x6[:,a],self.bounds[a,0],self.bounds[a,1]))
         return torch.stack(actions,axis=0).view(-1,N_ACTIONS)
         
     def clip(self, x, x_min, x_max):
@@ -173,11 +173,10 @@ class DDPG_AC(Policy):
     def learn(self):
         # get state $s_t$
         st = self.states.vec_data
-        st = torch.tensor(st, requires_grad=True, dtype=torch.float,device=self.device)
+        st = torch.tensor(st, requires_grad=False, dtype=torch.float,device=self.device)
         
         st1 = st.unsqueeze(0)
         at = self.ac.μ(st1).detach()
-        Q = self.ac.Q(st1,at)
         
         # add noise
         a_env = (at.data.cpu() + torch.rand(at.data.shape)).numpy()[0]
@@ -198,31 +197,40 @@ class DDPG_AC(Policy):
         self.memory[index,-N_STATES-1] = rt
         self.memory[index,-N_STATES:] = st_
         
-        st_1 = st_.unsqueeze(0)
-        at_ = self.ac_tar.μ(st_1)
-        Q_ = self.ac_tar.Q(st_1,at_).detach()
+        # randomly sample from memory
+        right = self.cnt+1 if self.cnt<MEMORY_CAPACITY else MEMORY_CAPACITY
+        s = self.memory[:right,:N_STATES]
+        a = self.memory[:right,N_STATES:N_STATES+N_ACTIONS]
+        r = self.memory[:right,-N_STATES-1] 
+        s_ = self.memory[:right,-N_STATES:]
+        random_index = np.random.choice(right, BATCH_SIZE)
+        si,ai,ri,si_ = s[random_index], a[random_index], r[random_index], s_[random_index]
+        
+        Q = self.ac.Q(si,ai)
+        ai_ = self.ac_tar.μ(si_)
+        Q_ = self.ac_tar.Q(si_,ai_).detach()
         
         # δ_t = r_t + γ * Q(s_{t+1}, a_{t+1}) - Q(s_t, a_t)
-        δt = rt + γ * Q_ - Q
-        loss1 = δt**2
+        δt = ri + γ * Q_ - Q
+        loss1 = torch.sum(δt**2)
         loss1.backward(retain_graph=True)
         self.optimQ.step()
         self.optimQ.zero_grad()
-        #print(loss1,flush=True)
-        
-        right = self.cnt if self.cnt<MEMORY_CAPACITY else MEMORY_CAPACITY
-        Qm = self.ac(self.memory[:right,:N_STATES])
+
+        Qm = self.ac(si.detach())
         loss2 = -torch.sum(Qm)
+        loss2.backward()
         self.optimμ.step()
         self.optimμ.zero_grad()
-        #print(loss2,flush=True)
         
         # update target network
-        p = self.ac.named_parameters()
-        p_tar = self.ac_tar.named_parameters()
-        d_tar = dict(p_tar)
-        for name, param in p:
-            d_tar[name].data = tau*param.data + (1-tau) * d_tar[name].data
+        if  (self.cnt+1) % TARGET_REPLACE_ITER == 0:
+            # update target network
+            p = self.ac.named_parameters()
+            p_tar = self.ac_tar.named_parameters()
+            d_tar = dict(p_tar)
+            for name, param in p:
+                d_tar[name].data = tau*param.data + (1-tau) * d_tar[name].data
         
         self.cnt += 1
         return rt, done
