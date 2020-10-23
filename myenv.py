@@ -24,11 +24,11 @@ EPSILON = 0.9
 γ = 0.9
 STATES_SHAPE = [3,15,15,3]
 LR = 1e-3
-BATCH_SIZE = 100
-TRAIN_FREQ = 100
+BATCH_SIZE = 128
+TRAIN_FREQ = 20
 TARGET_REPLACE_ITER = TRAIN_FREQ * 4
 tau = 0.5
-t_episode = 100
+t_episode = 200
 
 class HasPickedAndLiftedCondition(TerminalCondition):
     def __init__(self, robot, box, world):
@@ -102,7 +102,9 @@ class μNet(nn.Module):
         actions = []
         for a in range(N_ACTIONS):
             actions.append(self.clip(x6[:,a],self.bounds[a,0],self.bounds[a,1]))
-        return torch.stack(actions,axis=0).view(-1,N_ACTIONS)
+        #print(actions)
+        action_cliped = torch.stack(actions,axis=1)
+        return action_cliped
         
     def clip(self, x, x_min, x_max):
         return x_min + (x_max-x_min)*(self.tanh(x)+1)/2
@@ -161,13 +163,13 @@ class DDPG_AC(Policy):
         self.actions = actions
         self.action_data = None
         self.device = device
-        self.ac = ACNet(bounds)
+        self.ac = ACNet(actions.bounds())
         self.ac.to(device)
         trainableμ = list(filter(lambda p: p.requires_grad, self.ac.μ.parameters()))
         self.optimμ = torch.optim.Adam(trainableμ, lr=LR, betas=(0.9, 0.95), eps=1e-6, weight_decay=1e-5)
         trainableQ = list(filter(lambda p: p.requires_grad, self.ac.Q.parameters()))
         self.optimQ = torch.optim.Adam(trainableQ, lr=LR, betas=(0.9, 0.95), eps=1e-6, weight_decay=1e-5)
-        self.ac_tar = ACNet(bounds)
+        self.ac_tar = ACNet(actions.bounds())
         self.ac_tar.to(device)
         
         self.memory = torch.zeros((MEMORY_CAPACITY,N_STATES*2+N_ACTIONS+1),device=self.device)
@@ -242,8 +244,8 @@ class DDPG_AC(Policy):
             s_ = recall_epi[:,-N_STATES:]
             end_effector = self.robot.get_end_effector_ids()[-1]
             x1,y1,z1 = self.robot.get_link_world_positions(end_effector)
-            s[:,-3:] = torch.tensor([[x1,y1,z1]])
-            s_[:,-3:] = torch.tensor([[x1,y1,z1]])
+            s[:,-STATES_SHAPE[-1]:] = torch.tensor([[x1,y1,z1]])
+            s_[:,-STATES_SHAPE[-1]:] = torch.tensor([[x1,y1,z1]])
             r[-1] = 0.
             
             self.train(s,a,r,s_)
@@ -286,7 +288,6 @@ if __name__=="__main__":
     manipulator = world.load_robot('wam')
     states = BasePositionState(manipulator) + JointPositionState(manipulator) + JointVelocityState(manipulator) + PositionState(box,world)
     action = JointPositionAction(manipulator)
-    bounds = action.bounds()
     r_cond = HasTouchedCondition(manipulator,box,world,0.5)
     t_cond = HasTouchedCondition(manipulator,box,world,0.5)
     reward = TerminalReward(r_cond,subreward=-1,final_reward=0)
@@ -294,7 +295,7 @@ if __name__=="__main__":
     env = Env(world, states, rewards=reward,actions=action,terminal_conditions=t_cond)
     
     env.reset()
-    ddpg = DDPG_AC(env, states, action,manipulator, "cpu")
+    ddpg = DDPG_AC(env, states, action,manipulator, "cuda")
     num_episodes = 30000
     save_freq = 200
     
@@ -320,7 +321,7 @@ if __name__=="__main__":
         # collect statistics of #n_samples results
         if i%n_samples==0:
             tok = time.time()
-            print("{}\tSuc rate: {:.4f}\tAvg reward: {:.2f}\tTime: {:.1f}".format(i/n_samples,n_success/n_samples,s_reward/n_samples,tok-tik),flush=True)
+            print("{}\tSuc rate: {:.4f}\tAvg reward: {:.2f}\tTime: {:.1f}".format(int(i/n_samples),n_success/n_samples,s_reward/n_samples,tok-tik),flush=True)
             n_success = 0
             s_reward = 0
             tik = time.time()
