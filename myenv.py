@@ -22,10 +22,11 @@ N_ACTIONS = 15
 MEMORY_CAPACITY = 1000
 EPSILON = 0.9
 γ = 0.9
-TARGET_REPLACE_ITER = 100
 STATES_SHAPE = [3,15,15,3]
 LR = 1e-3
-BATCH_SIZE = 20
+BATCH_SIZE = 100
+TRAIN_FREQ = 100
+TARGET_REPLACE_ITER = TRAIN_FREQ * 4
 tau = 0.5
 
 class HasPickedAndLiftedCondition(TerminalCondition):
@@ -197,31 +198,32 @@ class DDPG_AC(Policy):
         self.memory[index,-N_STATES-1] = rt
         self.memory[index,-N_STATES:] = st_
         
-        # randomly sample from memory
-        right = self.cnt+1 if self.cnt<MEMORY_CAPACITY else MEMORY_CAPACITY
-        s = self.memory[:right,:N_STATES]
-        a = self.memory[:right,N_STATES:N_STATES+N_ACTIONS]
-        r = self.memory[:right,-N_STATES-1] 
-        s_ = self.memory[:right,-N_STATES:]
-        random_index = np.random.choice(right, BATCH_SIZE)
-        si,ai,ri,si_ = s[random_index], a[random_index], r[random_index], s_[random_index]
-        
-        Q = self.ac.Q(si,ai)
-        ai_ = self.ac_tar.μ(si_)
-        Q_ = self.ac_tar.Q(si_,ai_).detach()
-        
-        # δ_t = r_t + γ * Q(s_{t+1}, a_{t+1}) - Q(s_t, a_t)
-        δt = ri + γ * Q_ - Q
-        loss1 = torch.sum(δt**2)
-        loss1.backward(retain_graph=True)
-        self.optimQ.step()
-        self.optimQ.zero_grad()
+        if (self.cnt + 1) % TRAIN_FREQ == 0:
+            # randomly sample from memory
+            right = self.cnt+1 if self.cnt<MEMORY_CAPACITY else MEMORY_CAPACITY
+            s = self.memory[:right,:N_STATES]
+            a = self.memory[:right,N_STATES:N_STATES+N_ACTIONS]
+            r = self.memory[:right,-N_STATES-1] 
+            s_ = self.memory[:right,-N_STATES:]
+            random_index = np.random.choice(right, BATCH_SIZE)
+            si,ai,ri,si_ = s[random_index], a[random_index], r[random_index], s_[random_index]
+            
+            Q = self.ac.Q(si,ai)
+            ai_ = self.ac_tar.μ(si_)
+            Q_ = self.ac_tar.Q(si_,ai_).detach()
+            
+            # δ_t = r_t + γ * Q(s_{t+1}, a_{t+1}) - Q(s_t, a_t)
+            δt = ri + γ * Q_ - Q
+            loss1 = torch.sum(δt**2)
+            loss1.backward(retain_graph=True)
+            self.optimQ.step()
+            self.optimQ.zero_grad()
 
-        Qm = self.ac(si.detach())
-        loss2 = -torch.sum(Qm)
-        loss2.backward()
-        self.optimμ.step()
-        self.optimμ.zero_grad()
+            Qm = self.ac(si.detach())
+            loss2 = -torch.sum(Qm)
+            loss2.backward()
+            self.optimμ.step()
+            self.optimμ.zero_grad()
         
         # update target network
         if  (self.cnt+1) % TARGET_REPLACE_ITER == 0:
@@ -246,7 +248,7 @@ def success(reward):
     return reward >= -0.5
 
 if __name__=="__main__":
-    sim = prl.simulators.Bullet(render=True)
+    sim = prl.simulators.Bullet(render=False)
     world = prl.worlds.BasicWorld(sim)
     box = world.load_box(position=(0.5,0,0.2),dimensions=(0.1,0.1,0.1),mass=0.1,color=[0,0,1,1])
     manipulator = world.load_robot('wam')
@@ -261,7 +263,7 @@ if __name__=="__main__":
     
     env.reset()
     ddpg = DDPG_AC(env, states, action, "cuda")
-    num_episodes = 3000
+    num_episodes = 30000
     save_freq = 200
     t_episode = 100
     n_samples = 100
@@ -280,12 +282,12 @@ if __name__=="__main__":
                 break
         n_success += 1 if done else 0
         s_reward += reward
-        print("SUCCESS" if done else "FAIL",flush=True)
+        #print("SUCCESS" if done else "FAIL",flush=True)
         
         # collect statistics of #n_samples results
         if i%n_samples==0:
             tok = time.time()
-            print("{}\tSuc rate: {:.4f}\tAvg reward: {:.4}\tTime: {}".format(i/n_samples,n_success/n_samples,s_reward/n_samples,tok-tik),flush=True)
+            print("{}\tSuc rate: {:.4f}\tAvg reward: {:.2f}\tTime: {:.1f}".format(i/n_samples,n_success/n_samples,s_reward/n_samples,tok-tik),flush=True)
             n_success = 0
             s_reward = 0
             tik = time.time()
