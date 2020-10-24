@@ -4,11 +4,11 @@ from pyrobolearn.policies import Policy
 from pyrobolearn.rewards.terminal_rewards import TerminalReward
 from pyrobolearn.terminal_conditions import LinkPositionCondition, TerminalCondition
 from pyrobolearn.states.body_states import DistanceState, PositionState, VelocityState
-from pyrobolearn.states import LinkPositionState, JointPositionState, JointVelocityState, LinkWorldPositionState, CameraState
+from pyrobolearn.states import LinkPositionState, JointPositionState, JointVelocityState, LinkWorldPositionState, SensorState
 from pyrobolearn.actions.robot_actions.joint_actions import JointPositionAction
 from pyrobolearn.tasks.reinforcement import RLTask
 from pyrobolearn.rewards.reward import Reward
-from pyrobolearn.robots.sensors import CameraSensor
+from pyrobolearn.robots.sensors import RGBCameraSensor
 
 import torch
 import torch.nn as nn
@@ -27,6 +27,24 @@ TRAIN_FREQ = 20
 TARGET_REPLACE_ITER = TRAIN_FREQ
 tau = 0.9
 t_episode = 100
+
+class MyCameraState(SensorState):
+    def __init__(self, camera):
+        self._sensor = camera
+        super(MyCameraState, self).__init__(camera)
+    def _read(self):
+        if self._update:
+            self.sensor.sense(apply_noise=True)
+
+        # get the data from the sensor
+        self.data = self.sensor.data.reshape(-1)
+    def _reset(self):
+        self._cnt = 0
+        self._update = False
+        self._sensor.enable()
+        while self._sensor.sense() is None:
+            self._sensor.sense()
+        self._read()
 
 class HasPickedAndLiftedCondition(TerminalCondition):
     def __init__(self, robot, box, world):
@@ -86,20 +104,15 @@ class μNet(nn.Module):
         self.act = nn.LeakyReLU(0.2, inplace=True)
 
     def forward(self, x):
-        x1 = self.fc1(x)
-        x1 = self.act(x1)
-        x2 = self.fc2(x1)
-        x2 = self.act(x2)
-        x3 = self.fc3(x2)
-        x3 = self.act(x3)
-        x4 = self.fc4(x3)
-        x4 = self.act(x4)
-        x5 = self.fc5(x4)
-        x5 = self.act(x5)
-        x6 = self.out(x5)
+        x = self.act(self.fc1(x))
+        x = self.act(self.fc2(x))
+        x = self.act(self.fc3(x))
+        x = self.act(self.fc4(x))
+        x = self.act(self.fc5(x))
+        x = self.out(x)
         for i in range(N_ACTIONS):
-            x6[:,i] = self.clip(x6[:,i], self.bounds[i,0],self.bounds[i,1])
-        return x6
+            x[:,i] = self.clip(x[:,i], self.bounds[i,0],self.bounds[i,1])
+        return x
         
     def clip(self, x, x_min, x_max):
         return x_min + (x_max-x_min)*(self.tanh(x)+1)/2
@@ -117,23 +130,19 @@ class QNet(nn.Module):
         self.out2.weight.data.normal_(0, 0.1)   # initialization
         self.out3 = nn.Linear(100, 50)
         self.out3.weight.data.normal_(0, 0.1)   # initialization
-        self.out4 = nn.Linear(50, 1)
-        self.out4.weight.data.normal_(0, 0.1)   # initialization
+        self.out = nn.Linear(50, 1)
+        self.out.weight.data.normal_(0, 0.1)   # initialization
         self.tanh = nn.Tanh()
         self.act = nn.LeakyReLU(0.2, inplace=True)
 
     def forward(self, x1, x2):
         x1 = self.act(self.fc1(x1))
         x2 = self.act(self.fc2(x2))
-        x3 = torch.cat([x1,x2],dim=1)
-        x4 = self.act(x3)
-        x5 = self.out1(x4)
-        x6 = self.act(x5)
-        x7 = self.out2(x6)
-        x8 = self.act(x7)
-        x9 = self.out3(x8)
-        x10 = self.act(x9)
-        out = self.out4(x10)
+        x = torch.cat([x1,x2],dim=1)
+        x = self.act(self.out1(x))
+        x = self.act(self.out2(x))
+        x = self.act(self.out3(x))
+        out = self.out(x)
         return out
 
 class ACNet(nn.Module):
@@ -282,8 +291,8 @@ if __name__=="__main__":
     box = world.load_box(position=(0.5,0,0.2),dimensions=(0.1,0.1,0.1),mass=0.1,color=[0,0,1,1])
     manipulator = world.load_robot('wam')
     end_effector = manipulator.get_end_effector_ids()[-1]
-    camera = CameraSensor(sim, manipulator, end_effector, 16,16)
-    states = CameraState(camera) + LinkPositionState(manipulator) + LinkWorldPositionState(manipulator) + JointPositionState(manipulator) + JointVelocityState(manipulator) + PositionState(box,world)
+    camera = RGBCameraSensor(sim, manipulator, end_effector, 16,16)
+    states = MyCameraState(camera) + LinkWorldPositionState(manipulator) + JointPositionState(manipulator) + JointVelocityState(manipulator) + PositionState(box,world)
     STATES_SHAPE = [i.shape[0] for i in states()]
     print(STATES_SHAPE)
     N_STATES = sum(STATES_SHAPE)
