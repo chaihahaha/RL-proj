@@ -328,7 +328,7 @@ if __name__=="__main__":
     STATES_SHAPE = [i.shape[0] for i in states()]
     print(STATES_SHAPE)
     N_STATES = sum(STATES_SHAPE)
-    action = JointPositionAction(manipulator)
+    action = JointPositionAction(manipulator, kp=manipulator.kp, kd=manipulator.kd)
     r_cond = HasTouchedCondition(manipulator,box,world,0.5)
     t_cond = HasTouchedCondition(manipulator,box,world,0.5)
     reward = TerminalReward(r_cond,subreward=-1,final_reward=0)
