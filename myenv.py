@@ -18,7 +18,7 @@ from itertools import count
 
 N_ACTIONS = 15
 MEMORY_CAPACITY = 1000
-EPSILON = 0.9
+EPSILON = 1e-2
 γ = 0.9
 LR = 1e-3
 BATCH_SIZE = 512
@@ -177,7 +177,7 @@ class DDPG_AC(Policy):
         at = self.ac.μ(st1).detach()
         
         # add noise
-        a_env = (at.data.cpu() + torch.rand(at.data.shape)).numpy()[0]
+        a_env = (at.data.cpu() + EPSILON*torch.randn(at.data.shape)).numpy()[0]
 
         # apply action
         self.set_action_data(a_env)
@@ -198,14 +198,14 @@ class DDPG_AC(Policy):
         if (self.cnt + 1) % TRAIN_FREQ == 0:
             # randomly sample from memory
             right = self.cnt+1 if self.cnt<MEMORY_CAPACITY else MEMORY_CAPACITY
-            s = self.memory[:right,:N_STATES]
-            a = self.memory[:right,N_STATES:N_STATES+N_ACTIONS]
-            r = self.memory[:right,-N_STATES-1]
-            s_ = self.memory[:right,-N_STATES:]
+            mem = self.memory[:right,:]
             random_index = np.random.choice(right, BATCH_SIZE)
-            si,ai,ri,si_ = s[random_index], a[random_index], r[random_index], s_[random_index]
+            s = self.memory[random_index,:N_STATES]
+            a = self.memory[random_index,N_STATES:N_STATES+N_ACTIONS]
+            r = self.memory[random_index,-N_STATES-1:-N_STATES]
+            s_ = self.memory[random_index,-N_STATES:]
             
-            self.train(si,ai,ri,si_)
+            self.train(s,a,r,s_)
         
         # update target network
         if  (self.cnt+1) % TARGET_REPLACE_ITER == 0:
