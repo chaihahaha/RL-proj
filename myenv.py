@@ -170,21 +170,21 @@ class DDPG_AC(Policy):
 
     def learn(self, timeout):
         # get state $s_t$
-        st = self.states.vec_data
-        st = torch.tensor(st, requires_grad=False, dtype=torch.float,device=self.device)
+        st = self.states.vec_torch_data.float().to(self.device).unsqueeze(0)
         
-        st1 = st.unsqueeze(0)
-        at = self.ac.μ(st1).detach()
+        # compute action with actor μ
+        at = self.ac.μ(st) + EPSILON*torch.randn((st.shape[0],N_ACTIONS),device=self.device)
         
-        # add noise
-        a_env = (at.data.cpu() + EPSILON*torch.randn(at.data.shape)).numpy()[0]
+        # cast to numpy
+        at_np = (at.data.cpu()).numpy()[0]
 
         # apply action
-        self.set_action_data(a_env)
+        self.set_action_data(at_np)
         self.actions()
         
         # step in environment to get next state $s_{t+1}$, reward $r_t$
         st_, rt, done, info = self.env.step()
+
         # cast to tensor
         st_ = torch.tensor(st_, dtype=torch.float,device=self.device)
         
@@ -230,10 +230,13 @@ class DDPG_AC(Policy):
             a = recall_epi[:,N_STATES:N_STATES+N_ACTIONS]
             r = recall_epi[:,-N_STATES-1:-N_STATES]
             s_ = recall_epi[:,-N_STATES:]
+            
             end_effector = self.robot.get_end_effector_ids()[-1]
             x1,y1,z1 = self.robot.get_link_world_positions(end_effector)
-            s[:,-STATES_SHAPE[-1]:] = torch.tensor([[x1,y1,z1]])
-            s_[:,-STATES_SHAPE[-1]:] = torch.tensor([[x1,y1,z1]])
+            fake_goal = torch.tensor([[x1,y1,z1]])
+            
+            s[:,-STATES_SHAPE[-1]:] = fake_goal
+            s_[:,-STATES_SHAPE[-1]:] = fake_goal
             r[0,0] = 0.
             recall_epi = torch.cat([s,a,r,s_],1)
             for i in range(t_episode):
@@ -245,8 +248,7 @@ class DDPG_AC(Policy):
         
     def train(self, si, ai, ri, si_):
             Q = self.ac.Q(si,ai)
-            ai_ = self.ac_tar.μ(si_)
-            Q_ = self.ac_tar.Q(si_,ai_).detach()
+            Q_ = self.ac_tar(si_).detach()
             
             # δ_t = r_t + γ * Q(s_{t+1}, a_{t+1}) - Q(s_t, a_t)
             δt = ri + γ * Q_ - Q
