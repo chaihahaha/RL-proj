@@ -24,9 +24,9 @@ EPSILON = 0.9
 γ = 0.9
 STATES_SHAPE = [3,15,15,3]
 LR = 1e-3
-BATCH_SIZE = 128
+BATCH_SIZE = 32
 TRAIN_FREQ = 20
-TARGET_REPLACE_ITER = TRAIN_FREQ * 4
+TARGET_REPLACE_ITER = TRAIN_FREQ
 tau = 0.5
 t_episode = 200
 
@@ -99,12 +99,9 @@ class μNet(nn.Module):
         x5 = self.fc5(x4)
         x5 = self.act(x5)
         x6 = self.out(x5)
-        actions = []
-        for a in range(N_ACTIONS):
-            actions.append(self.clip(x6[:,a],self.bounds[a,0],self.bounds[a,1]))
-        #print(actions)
-        action_cliped = torch.stack(actions,axis=1)
-        return action_cliped
+        for i in range(N_ACTIONS):
+            x6[:,i] = self.clip(x6[:,i], self.bounds[i,0],self.bounds[i,1])
+        return x6
         
     def clip(self, x, x_min, x_max):
         return x_min + (x_max-x_min)*(self.tanh(x)+1)/2
@@ -130,7 +127,7 @@ class QNet(nn.Module):
     def forward(self, x1, x2):
         x1 = self.act(self.fc1(x1))
         x2 = self.act(self.fc2(x2))
-        x3 = torch.stack([x1,x2],1).view(-1,100)
+        x3 = torch.cat([x1,x2],dim=1)
         x4 = self.act(x3)
         x5 = self.out1(x4)
         x6 = self.act(x5)
@@ -197,10 +194,10 @@ class DDPG_AC(Policy):
         
         # keep (st, at, rt, st_) in memory
         index = self.cnt % MEMORY_CAPACITY
-        self.memory[index,:N_STATES] = st
-        self.memory[index,N_STATES:N_STATES+N_ACTIONS] = at
-        self.memory[index,-N_STATES-1] = rt
-        self.memory[index,-N_STATES:] = st_
+        self.memory[index,:N_STATES] = st.detach()
+        self.memory[index,N_STATES:N_STATES+N_ACTIONS] = at.detach()
+        self.memory[index,-N_STATES-1] = torch.tensor(rt)
+        self.memory[index,-N_STATES:] = st_.detach()
         
         if (self.cnt + 1) % TRAIN_FREQ == 0:
             # randomly sample from memory
@@ -240,15 +237,17 @@ class DDPG_AC(Policy):
             # replace goal pos with end effector pos
             s = recall_epi[:,:N_STATES]
             a = recall_epi[:,N_STATES:N_STATES+N_ACTIONS]
-            r = recall_epi[:,-N_STATES-1]
+            r = recall_epi[:,-N_STATES-1:-N_STATES]
             s_ = recall_epi[:,-N_STATES:]
             end_effector = self.robot.get_end_effector_ids()[-1]
             x1,y1,z1 = self.robot.get_link_world_positions(end_effector)
             s[:,-STATES_SHAPE[-1]:] = torch.tensor([[x1,y1,z1]])
             s_[:,-STATES_SHAPE[-1]:] = torch.tensor([[x1,y1,z1]])
-            r[-1] = 0.
-            
-            self.train(s,a,r,s_)
+            r[-1,0] = 0.
+            recall_epi = torch.cat([s,a,r,s_],1)
+            for i in range(t_episode):
+                self.cnt += 1
+                self.memory[self.cnt % MEMORY_CAPACITY] = recall_epi[i]
             
         self.cnt += 1
         return rt, done
