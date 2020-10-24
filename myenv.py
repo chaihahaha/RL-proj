@@ -3,11 +3,12 @@ from pyrobolearn.envs import Env
 from pyrobolearn.policies import Policy
 from pyrobolearn.rewards.terminal_rewards import TerminalReward
 from pyrobolearn.terminal_conditions import LinkPositionCondition, TerminalCondition
-from pyrobolearn.states.body_states import PositionState, VelocityState
-from pyrobolearn.states import LinkPositionState, JointPositionState, JointVelocityState
+from pyrobolearn.states.body_states import DistanceState, PositionState, VelocityState
+from pyrobolearn.states import LinkPositionState, JointPositionState, JointVelocityState, LinkWorldPositionState, CameraState
 from pyrobolearn.actions.robot_actions.joint_actions import JointPositionAction
 from pyrobolearn.tasks.reinforcement import RLTask
 from pyrobolearn.rewards.reward import Reward
+from pyrobolearn.robots.sensors import CameraSensor
 
 import torch
 import torch.nn as nn
@@ -280,8 +281,11 @@ if __name__=="__main__":
     world = prl.worlds.BasicWorld(sim)
     box = world.load_box(position=(0.5,0,0.2),dimensions=(0.1,0.1,0.1),mass=0.1,color=[0,0,1,1])
     manipulator = world.load_robot('wam')
-    states = LinkPositionState(manipulator,manipulator.get_end_effector_ids()[-1]) + JointPositionState(manipulator) + JointVelocityState(manipulator) + PositionState(box,world)
+    end_effector = manipulator.get_end_effector_ids()[-1]
+    camera = CameraSensor(sim, manipulator, end_effector, 16,16)
+    states = CameraState(camera) + LinkPositionState(manipulator) + LinkWorldPositionState(manipulator) + JointPositionState(manipulator) + JointVelocityState(manipulator) + PositionState(box,world)
     STATES_SHAPE = [i.shape[0] for i in states()]
+    print(STATES_SHAPE)
     N_STATES = sum(STATES_SHAPE)
     action = JointPositionAction(manipulator)
     r_cond = HasTouchedCondition(manipulator,box,world,0.5)
