@@ -218,18 +218,12 @@ class DDPG_AC(Policy):
         
         # HER replace goal
         if timeout and (not done):
-            right = (self.cnt + 1) % MEMORY_CAPACITY 
-            left = right-t_episode
+            right = self.cnt % MEMORY_CAPACITY 
             recall_epi = torch.zeros((t_episode, self.memory.shape[1]))
-            mem = self.memory.detach()
+            mem = self.memory.detach().clone()
             
-            if left<0:
-                recall_epi[left:,:] = mem[left:,:]
-                if right != 0:
-                    recall_epi[:right,:] = mem[:right,:]
-                    recall_epi[-1,:], recall_epi[right-1,:] = recall_epi[right-1,:].clone(), recall_epi[-1,:].clone()
-            else:
-                recall_epi = mem[left:right]
+            for i in range(t_episode):
+                recall_epi[i,:] = mem[(right-i) % MEMORY_CAPACITY,:]
                 
             # replace goal pos with end effector pos
             s = recall_epi[:,:N_STATES]
@@ -240,7 +234,7 @@ class DDPG_AC(Policy):
             x1,y1,z1 = self.robot.get_link_world_positions(end_effector)
             s[:,-STATES_SHAPE[-1]:] = torch.tensor([[x1,y1,z1]])
             s_[:,-STATES_SHAPE[-1]:] = torch.tensor([[x1,y1,z1]])
-            r[-1,0] = 0.
+            r[0,0] = 0.
             recall_epi = torch.cat([s,a,r,s_],1)
             for i in range(t_episode):
                 self.cnt += 1
