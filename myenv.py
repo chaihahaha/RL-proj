@@ -4,31 +4,28 @@ from pyrobolearn.policies import Policy
 from pyrobolearn.rewards.terminal_rewards import TerminalReward
 from pyrobolearn.terminal_conditions import LinkPositionCondition, TerminalCondition
 from pyrobolearn.states.body_states import PositionState, VelocityState
-from pyrobolearn.states import BasePositionState, JointPositionState, JointVelocityState
+from pyrobolearn.states import LinkPositionState, JointPositionState, JointVelocityState
 from pyrobolearn.actions.robot_actions.joint_actions import JointPositionAction
 from pyrobolearn.tasks.reinforcement import RLTask
 from pyrobolearn.rewards.reward import Reward
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 import numpy as np
 import time
 from itertools import count
 
-N_STATES = 36
 N_ACTIONS = 15
 MEMORY_CAPACITY = 1000
 EPSILON = 0.9
 γ = 0.9
-STATES_SHAPE = [3,15,15,3]
 LR = 1e-3
-BATCH_SIZE = 32
+BATCH_SIZE = 512
 TRAIN_FREQ = 20
 TARGET_REPLACE_ITER = TRAIN_FREQ
-tau = 0.5
-t_episode = 200
+tau = 0.9
+t_episode = 100
 
 class HasPickedAndLiftedCondition(TerminalCondition):
     def __init__(self, robot, box, world):
@@ -135,8 +132,7 @@ class QNet(nn.Module):
         x8 = self.act(x7)
         x9 = self.out3(x8)
         x10 = self.act(x9)
-        x11 = self.out4(x10)
-        out = self.act(x11)
+        out = self.out4(x10)
         return out
 
 class ACNet(nn.Module):
@@ -188,7 +184,7 @@ class DDPG_AC(Policy):
         self.actions()
         
         # step in environment to get next state $s_{t+1}$, reward $r_t$
-        st_, rt, done, info = self.env.step(a_env)
+        st_, rt, done, info = self.env.step()
         # cast to tensor
         st_ = torch.tensor(st_, dtype=torch.float,device=self.device)
         
@@ -231,6 +227,7 @@ class DDPG_AC(Policy):
                 recall_epi[left:,:] = mem[left:,:]
                 if right != 0:
                     recall_epi[:right,:] = mem[:right,:]
+                    recall_epi[-1,:], recall_epi[right-1,:] = recall_epi[right-1,:].clone(), recall_epi[-1,:].clone()
             else:
                 recall_epi = mem[left:right]
                 
@@ -247,7 +244,7 @@ class DDPG_AC(Policy):
             recall_epi = torch.cat([s,a,r,s_],1)
             for i in range(t_episode):
                 self.cnt += 1
-                self.memory[self.cnt % MEMORY_CAPACITY] = recall_epi[i]
+                self.memory[self.cnt % MEMORY_CAPACITY] = recall_epi[i].detach()
             
         self.cnt += 1
         return rt, done
@@ -264,7 +261,7 @@ class DDPG_AC(Policy):
             self.optimQ.step()
             self.optimQ.zero_grad()
 
-            Qm = self.ac(si.detach())
+            Qm = self.ac(si)
             loss2 = -torch.sum(Qm)
             loss2.backward()
             self.optimμ.step()
@@ -285,7 +282,9 @@ if __name__=="__main__":
     world = prl.worlds.BasicWorld(sim)
     box = world.load_box(position=(0.5,0,0.2),dimensions=(0.1,0.1,0.1),mass=0.1,color=[0,0,1,1])
     manipulator = world.load_robot('wam')
-    states = BasePositionState(manipulator) + JointPositionState(manipulator) + JointVelocityState(manipulator) + PositionState(box,world)
+    states = LinkPositionState(manipulator,manipulator.get_end_effector_ids()[-1]) + JointPositionState(manipulator) + JointVelocityState(manipulator) + PositionState(box,world)
+    STATES_SHAPE = [i.shape[0] for i in states()]
+    N_STATES = sum(STATES_SHAPE)
     action = JointPositionAction(manipulator)
     r_cond = HasTouchedCondition(manipulator,box,world,0.5)
     t_cond = HasTouchedCondition(manipulator,box,world,0.5)
@@ -295,6 +294,7 @@ if __name__=="__main__":
     
     env.reset()
     ddpg = DDPG_AC(env, states, action,manipulator, "cuda")
+    #ddpg.load("ddpg.ckpt")
     num_episodes = 30000
     save_freq = 200
     
@@ -320,7 +320,7 @@ if __name__=="__main__":
         # collect statistics of #n_samples results
         if i%n_samples==0:
             tok = time.time()
-            print("{}\tSuc rate: {:.4f}\tAvg reward: {:.2f}\tTime: {:.1f}".format(int(i/n_samples),n_success/n_samples,s_reward/n_samples,tok-tik),flush=True)
+            print("{}\tSuc rate: {:.2f}\tAvg reward: {:.2f}\tTime: {:.1f}".format(int(i/n_samples),n_success/n_samples,s_reward/n_samples,tok-tik),flush=True)
             n_success = 0
             s_reward = 0
             tik = time.time()
