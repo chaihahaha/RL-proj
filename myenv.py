@@ -18,7 +18,7 @@ from itertools import count
 
 N_ACTIONS = 15
 MEMORY_CAPACITY = 1000
-EPSILON = 1e-2
+EPSILON = 0.1
 γ = 0.9
 LR = 1e-3
 BATCH_SIZE = 512
@@ -71,18 +71,18 @@ class μNet(nn.Module):
         self.bounds = bounds
         self.fc1 = nn.Linear(N_STATES, 50)
         self.fc1.weight.data.normal_(0, 0.1)   # initialization
-        self.fc2 = nn.Linear(50, 50)
+        self.fc2 = nn.Linear(50, 100)
         self.fc2.weight.data.normal_(0, 0.1)   # initialization
-        self.fc3 = nn.Linear(50, 50)
+        self.fc3 = nn.Linear(100, 50)
         self.fc3.weight.data.normal_(0, 0.1)   # initialization
-        self.fc4 = nn.Linear(50, 50)
+        self.fc4 = nn.Linear(50, 200)
         self.fc4.weight.data.normal_(0, 0.1)   # initialization
-        self.fc5 = nn.Linear(50, 50)
+        self.fc5 = nn.Linear(200, 50)
         self.fc5.weight.data.normal_(0, 0.1)   # initialization
         self.out = nn.Linear(50, N_ACTIONS)
         self.out.weight.data.normal_(0, 0.1)   # initialization
         self.tanh = nn.Tanh()
-        self.act = nn.LeakyReLU(0.2, inplace=False)
+        self.act = nn.LeakyReLU(0.2, inplace=True)
 
     def forward(self, x):
         x1 = self.fc1(x)
@@ -112,14 +112,14 @@ class QNet(nn.Module):
         self.fc2.weight.data.normal_(0, 0.1)   # initialization
         self.out1 = nn.Linear(100, 50)
         self.out1.weight.data.normal_(0, 0.1)   # initialization
-        self.out2 = nn.Linear(50, 50)
+        self.out2 = nn.Linear(50, 100)
         self.out2.weight.data.normal_(0, 0.1)   # initialization
-        self.out3 = nn.Linear(50, 50)
+        self.out3 = nn.Linear(100, 50)
         self.out3.weight.data.normal_(0, 0.1)   # initialization
         self.out4 = nn.Linear(50, 1)
         self.out4.weight.data.normal_(0, 0.1)   # initialization
         self.tanh = nn.Tanh()
-        self.act = nn.LeakyReLU(0.2, inplace=False)
+        self.act = nn.LeakyReLU(0.2, inplace=True)
 
     def forward(self, x1, x2):
         x1 = self.act(self.fc1(x1))
@@ -247,21 +247,23 @@ class DDPG_AC(Policy):
         return rt, done
         
     def train(self, si, ai, ri, si_):
-            Q = self.ac.Q(si,ai)
-            Q_ = self.ac_tar(si_).detach()
-            
-            # δ_t = r_t + γ * Q(s_{t+1}, a_{t+1}) - Q(s_t, a_t)
-            δt = ri + γ * Q_ - Q
-            loss1 = torch.sum(δt**2)
-            loss1.backward(retain_graph=True)
-            self.optimQ.step()
-            self.optimQ.zero_grad()
+        Qm = self.ac(si)
+        lossμ = -torch.mean(Qm)
+        lossμ.backward(retain_graph=True)
+        self.optimμ.step()
+        self.optimμ.zero_grad()
 
-            Qm = self.ac(si)
-            loss2 = -torch.sum(Qm)
-            loss2.backward()
-            self.optimμ.step()
-            self.optimμ.zero_grad()
+        Q = self.ac.Q(si,ai)
+        Q_ = self.ac_tar(si_).detach()
+        
+        # δ_t = r_t + γ * Q(s_{t+1}, a_{t+1}) - Q(s_t, a_t)
+        δt = ri + γ * Q_ - Q
+        lossQ = torch.mean(δt**2)
+        lossQ.backward()
+        self.optimQ.step()
+        self.optimQ.zero_grad()
+
+            
     
     def save(self, filename):
         torch.save({'net':self.ac.state_dict()}, filename)
