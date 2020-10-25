@@ -4,11 +4,10 @@ from pyrobolearn.policies import Policy
 from pyrobolearn.rewards.terminal_rewards import TerminalReward
 from pyrobolearn.terminal_conditions import LinkPositionCondition, TerminalCondition
 from pyrobolearn.states.body_states import DistanceState, PositionState, VelocityState
-from pyrobolearn.states import LinkPositionState, JointPositionState, JointVelocityState, LinkWorldPositionState, SensorState
-from pyrobolearn.actions.robot_actions.joint_actions import JointPositionAction
+from pyrobolearn.states import JointPositionState, JointVelocityState, LinkWorldPositionState
+from pyrobolearn.actions.robot_actions.joint_actions import JointPositionChangeAction
 from pyrobolearn.tasks.reinforcement import RLTask
 from pyrobolearn.rewards.reward import Reward
-from pyrobolearn.robots.sensors import RGBCameraSensor
 
 import torch
 import torch.nn as nn
@@ -19,36 +18,15 @@ from itertools import count
 
 N_ACTIONS = 15
 MEMORY_CAPACITY = 5120
-EPSILON = 0.4
-γ = 0.994
+EPSILON = 0.1
+ACTION_L2 = 0.1
+γ = 0.999
 LR = 1e-3
 BATCH_SIZE = 512
 TRAIN_FREQ = 20
 TARGET_REPLACE_ITER = TRAIN_FREQ * 2
 tau = 0.9
 t_episode = 100
-
-def layer_norm(layer, std=1.0, bias_const=0.0):
-    torch.nn.init.orthogonal_(layer.weight, std)
-    torch.nn.init.constant_(layer.bias, bias_const)
-    
-class MyCameraState(SensorState):
-    def __init__(self, camera):
-        self._sensor = camera
-        super(MyCameraState, self).__init__(camera)
-    def _read(self):
-        if self._update:
-            self.sensor.sense(apply_noise=True)
-
-        # get the data from the sensor
-        self.data = self.sensor.data.reshape(-1)
-    def _reset(self):
-        self._cnt = 0
-        self._update = False
-        self._sensor.enable()
-        while self._sensor.sense() is None:
-            self._sensor.sense()
-        self._read()
 
 class HasPickedAndLiftedCondition(TerminalCondition):
     def __init__(self, robot, box, world):
@@ -106,19 +84,13 @@ class μNet(nn.Module):
         self.out.weight.data.normal_(0, 1e-5)   # initialization
         self.tanh = nn.Tanh()
         self.act = nn.LeakyReLU(0.2, inplace=True)
-        
-        layer_norm(self.fc1)
-        layer_norm(self.fc2)
-        layer_norm(self.fc3)
-        layer_norm(self.fc4)
-        layer_norm(self.fc5)
 
     def forward(self, x):
         x = self.act(self.fc1(x))
-        #x = self.act(self.fc2(x))
-        #x = self.act(self.fc3(x))
-        #x = self.act(self.fc4(x))
-        #x = self.act(self.fc5(x))
+        x = self.act(self.fc2(x))
+        x = self.act(self.fc3(x))
+        x = self.act(self.fc4(x))
+        x = self.act(self.fc5(x))
         x = self.out(x)
         for i in range(N_ACTIONS):
             x[:,i] = self.clip(x[:,i], self.bounds[i,0],self.bounds[i,1])
@@ -144,20 +116,14 @@ class QNet(nn.Module):
         self.out.weight.data.normal_(0, 1e-5)   # initialization
         self.tanh = nn.Tanh()
         self.act = nn.LeakyReLU(0.2, inplace=True)
-        layer_norm(self.fc1)
-        layer_norm(self.fc2)
-        layer_norm(self.out1)
-        layer_norm(self.out2)
-        layer_norm(self.out3)
-        layer_norm(self.out)
 
     def forward(self, x1, x2):
         x1 = self.act(self.fc1(x1))
         x2 = self.act(self.fc2(x2))
         x = torch.cat([x1,x2],dim=1)
-        #x = self.act(self.out1(x))
-        #x = self.act(self.out2(x))
-        #x = self.act(self.out3(x))
+        x = self.act(self.out1(x))
+        x = self.act(self.out2(x))
+        x = self.act(self.out3(x))
         out = self.out(x)
         return out
 
@@ -196,7 +162,6 @@ class TD3(Policy):
     def learn(self, timeout):
         # get state $s_t$
         st = self.states.vec_torch_data.float().to(self.device).unsqueeze(0)
-        
         # compute action with actor μ
         at = self.μ(st)
         at += EPSILON*torch.randn(at.shape,device=self.device)
@@ -275,8 +240,9 @@ class TD3(Policy):
         return rt, done
         
     def update_actor(self, si):
-        Qm = self.Q1(si, self.μ(si))
-        lossμ = -torch.mean(Qm)
+        am = self.μ(si)
+        Qm = self.Q1(si, am)
+        lossμ = -torch.mean(Qm) + ACTION_L2 * torch.mean(am**2)
         lossμ.backward(retain_graph=True)
         self.optimμ.step()
         self.optimμ.zero_grad()
@@ -301,8 +267,6 @@ class TD3(Policy):
         self.optimQ2.step()
         self.optimQ2.zero_grad()
 
-            
-    
     def save(self, filename):
         torch.save({'μ':self.μ_tar.state_dict(),
                     'Q1':self.Q1_tar.state_dict(),
@@ -326,12 +290,11 @@ if __name__=="__main__":
     box = world.load_box(position=(0.5,0,0.2),dimensions=(0.1,0.1,0.1),mass=0.1,color=[0,0,1,1])
     manipulator = world.load_robot('wam')
     end_effector = manipulator.get_end_effector_ids()[-1]
-    camera = RGBCameraSensor(sim, manipulator, end_effector, 16,16)
-    states = MyCameraState(camera) + LinkWorldPositionState(manipulator) + JointPositionState(manipulator) + JointVelocityState(manipulator) + PositionState(box,world)
+    states = LinkWorldPositionState(manipulator) + JointPositionState(manipulator) + JointVelocityState(manipulator) + PositionState(box,world)
     STATES_SHAPE = [i.shape[0] for i in states()]
     print(STATES_SHAPE)
     N_STATES = sum(STATES_SHAPE)
-    action = JointPositionAction(manipulator, kp=manipulator.kp, kd=manipulator.kd)
+    action = JointPositionChangeAction(manipulator, kp=manipulator.kp, kd=manipulator.kd)
     r_cond = HasTouchedCondition(manipulator,box,world,0.5)
     t_cond = HasTouchedCondition(manipulator,box,world,0.5)
     reward = TerminalReward(r_cond,subreward=-1,final_reward=0)
@@ -340,6 +303,7 @@ if __name__=="__main__":
     
     env.reset()
     td3 = TD3(env, states, action,manipulator, "cuda")
+    
     #td3.load("td3.ckpt")
     num_episodes = 30000
     save_freq = 200
