@@ -49,10 +49,10 @@ class μNet(nn.Module):
 
     def forward(self, x):
         x = self.act(self.fc1(x))
-        x = self.act(self.fc2(x))
-        x = self.act(self.fc3(x))
-        x = self.act(self.fc4(x))
-        x = self.act(self.fc5(x))
+        #x = self.act(self.fc2(x))
+        #x = self.act(self.fc3(x))
+        #x = self.act(self.fc4(x))
+        #x = self.act(self.fc5(x))
         x = self.out(x)
         for i in range(N_ACTIONS):
             x[:,i] = self.clip(x[:,i], self.low[i],self.high[i])
@@ -89,9 +89,9 @@ class QNet(nn.Module):
         x1 = self.act(self.fc1(x1))
         x2 = self.act(self.fc2(x2))
         x = torch.cat([x1,x2],dim=1)
-        x = self.act(self.out1(x))
-        x = self.act(self.out2(x))
-        x = self.act(self.out3(x))
+        #x = self.act(self.out1(x))
+        #x = self.act(self.out2(x))
+        #x = self.act(self.out3(x))
         out = self.out(x)
         return out
 
@@ -172,22 +172,22 @@ class TD3(object):
                 for name, param in p:
                     d_tar[name].data = tau*param.data + (1-tau) * d_tar[name].data
         
-        # HER replace goal
-        if done:
-            right = self.cnt % MEMORY_CAPACITY 
-            recall_epi = torch.zeros((t_episode, N_STATES*2+N_ACTIONS+1),device=self.device)
-            
-            for i in range(t_episode):
-                recall_epi[i] = self.memory[(right-i) % MEMORY_CAPACITY]
+        # HER replace goal (buggy: overwriting real goal)
+#        if done:
+#            right = self.cnt % MEMORY_CAPACITY 
+#            recall_epi = torch.zeros((t_episode, N_STATES*2+N_ACTIONS+1),device=self.device)
+#            
+#            for i in range(t_episode):
+#                recall_epi[i] = self.memory[(right-i) % MEMORY_CAPACITY]
 
-            # replace goal pos with end effector pos
-            fake_goal = recall_epi[0,N_STATES-6:N_STATES-3].clone()
-            recall_epi[:,N_STATES-3:N_STATES] = fake_goal
-            recall_epi[:,-3:] = fake_goal
-            recall_epi[0,-N_STATES-1] = 0.
-            for i in range(t_episode):
-                self.cnt += 1
-                self.memory[self.cnt % MEMORY_CAPACITY] = recall_epi[i]
+#            # replace goal pos with end effector pos
+#            fake_goal = recall_epi[0,N_STATES-6:N_STATES-3].clone()
+#            recall_epi[:,N_STATES-3:N_STATES] = fake_goal
+#            recall_epi[:,-3:] = fake_goal
+#            recall_epi[0,-N_STATES-1] = 0.
+#            for i in range(t_episode):
+#                self.cnt += 1
+#                self.memory[self.cnt % MEMORY_CAPACITY] = recall_epi[i]
             
         self.cnt += 1
         return st_dic, rt, done, info

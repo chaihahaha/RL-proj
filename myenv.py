@@ -24,7 +24,7 @@ EPSILON = 0.4
 LR = 1e-3
 BATCH_SIZE = 512
 TRAIN_FREQ = 20
-TARGET_REPLACE_ITER = TRAIN_FREQ
+TARGET_REPLACE_ITER = TRAIN_FREQ * 2
 tau = 0.9
 t_episode = 100
 
@@ -115,10 +115,10 @@ class μNet(nn.Module):
 
     def forward(self, x):
         x = self.act(self.fc1(x))
-        x = self.act(self.fc2(x))
-        x = self.act(self.fc3(x))
-        x = self.act(self.fc4(x))
-        x = self.act(self.fc5(x))
+        #x = self.act(self.fc2(x))
+        #x = self.act(self.fc3(x))
+        #x = self.act(self.fc4(x))
+        #x = self.act(self.fc5(x))
         x = self.out(x)
         for i in range(N_ACTIONS):
             x[:,i] = self.clip(x[:,i], self.bounds[i,0],self.bounds[i,1])
@@ -155,9 +155,9 @@ class QNet(nn.Module):
         x1 = self.act(self.fc1(x1))
         x2 = self.act(self.fc2(x2))
         x = torch.cat([x1,x2],dim=1)
-        x = self.act(self.out1(x))
-        x = self.act(self.out2(x))
-        x = self.act(self.out3(x))
+        #x = self.act(self.out1(x))
+        #x = self.act(self.out2(x))
+        #x = self.act(self.out3(x))
         out = self.out(x)
         return out
 
@@ -230,11 +230,12 @@ class TD3(Policy):
             r = self.memory[random_index,-N_STATES-1:-N_STATES]
             s_ = self.memory[random_index,-N_STATES:]
             
-            self.train(s,a,r,s_)
+            self.update_critic(s,a,r,s_)
         
         # update target network
         if  (self.cnt+1) % TARGET_REPLACE_ITER == 0:
             # update target network
+            self.update_actor(s)
             update_pairs = [(self.μ, self.μ_tar), (self.Q1, self.Q1_tar), (self.Q2, self.Q2_tar)]
             for i, i_tar in update_pairs:
                 p = i.named_parameters()
@@ -273,14 +274,15 @@ class TD3(Policy):
         self.cnt += 1
         return rt, done
         
-    def train(self, si, ai, ri, si_):
+    def update_actor(self, si):
         Qm = self.Q1(si, self.μ(si))
         lossμ = -torch.mean(Qm)
         lossμ.backward(retain_graph=True)
         self.optimμ.step()
         self.optimμ.zero_grad()
         self.optimQ1.zero_grad()
-
+        
+    def update_critic(self,si,ai,ri,si_):
         ai_ = self.μ_tar(si_).detach()
         ai_ += EPSILON*torch.randn(ai_.shape,device=self.device)
         Q1_ = self.Q1_tar(si_,ai_).detach()
