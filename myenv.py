@@ -11,6 +11,7 @@ from pyrobolearn.rewards.reward import Reward
 
 import torch
 import torch.nn as nn
+from torch.nn.functional import normalize
 
 import numpy as np
 import time
@@ -18,7 +19,8 @@ from itertools import count
 
 N_ACTIONS = 15
 MEMORY_CAPACITY = 5120
-EPSILON = 0.1
+NOISE_EPSILON = 0.1
+RAND_EPSILON = 0.3
 ACTION_L2 = 0.1
 γ = 0.999
 LR = 1e-3
@@ -86,6 +88,12 @@ class μNet(nn.Module):
         self.act = nn.LeakyReLU(0.2, inplace=True)
 
     def forward(self, x):
+#        shape = [0] + STATES_SHAPE
+#        shape = np.cumsum(shape)
+#        x_list = []
+#        for i in range(len(shape)-1):
+#            x_list.append(normalize(x[:,shape[i]:shape[i+1]]))
+#        x = torch.cat(x_list,dim=1)
         x = self.act(self.fc1(x))
         x = self.act(self.fc2(x))
         x = self.act(self.fc3(x))
@@ -118,6 +126,13 @@ class QNet(nn.Module):
         self.act = nn.LeakyReLU(0.2, inplace=True)
 
     def forward(self, x1, x2):
+#        shape = [0] + STATES_SHAPE
+#        shape = np.cumsum(shape)
+#        x1_list = []
+#        for i in range(len(shape)-1):
+#            x1_list.append(normalize(x1[:,shape[i]:shape[i+1]]))
+#        x1 = torch.cat(x1_list,dim=1)
+#        x2 = normalize(x2)
         x1 = self.act(self.fc1(x1))
         x2 = self.act(self.fc2(x2))
         x = torch.cat([x1,x2],dim=1)
@@ -164,10 +179,13 @@ class TD3(Policy):
         st = self.states.vec_torch_data.float().to(self.device).unsqueeze(0)
         # compute action with actor μ
         at = self.μ(st)
-        at += EPSILON*torch.randn(at.shape,device=self.device)
+        at += NOISE_EPSILON*torch.randn(at.shape,device=self.device)
         
         # cast to numpy
-        at_np = (at.data.cpu()).numpy()[0]
+        if np.random.uniform() < RAND_EPSILON:
+            at_np = self.env.action.space.sample()
+        else:
+            at_np = (at.data.cpu()).numpy()[0]
 
         # apply action
         self.set_action_data(at_np)
@@ -182,7 +200,7 @@ class TD3(Policy):
         # keep (st, at, rt, st_) in memory
         index = self.cnt % MEMORY_CAPACITY
         self.memory[index,:N_STATES] = st.detach()
-        self.memory[index,N_STATES:N_STATES+N_ACTIONS] = at.detach()
+        self.memory[index,N_STATES:N_STATES+N_ACTIONS] = torch.tensor(at_np)
         self.memory[index,-N_STATES-1] = torch.tensor(rt)
         self.memory[index,-N_STATES:] = st_.detach()
         
@@ -250,7 +268,7 @@ class TD3(Policy):
         
     def update_critic(self,si,ai,ri,si_):
         ai_ = self.μ_tar(si_).detach()
-        ai_ += EPSILON*torch.randn(ai_.shape,device=self.device)
+        ai_ += NOISE_EPSILON*torch.randn(ai_.shape,device=self.device)
         Q1_ = self.Q1_tar(si_,ai_).detach()
         Q2_ = self.Q2_tar(si_,ai_).detach()
         y = ri + γ * torch.min(Q1_, Q2_)

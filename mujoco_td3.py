@@ -9,18 +9,15 @@ from itertools import count
 
 
 MEMORY_CAPACITY = 5120
-EPSILON = 0.03
-γ = 0.994
+EPSILON = 0.1
+γ = 0.996
 LR = 1e-3
 BATCH_SIZE = 512
-TRAIN_FREQ = 4
-TARGET_REPLACE_ITER = TRAIN_FREQ * 2
+TRAIN_FREQ = 1
+TARGET_REPLACE_ITER = TRAIN_FREQ 
 tau = 0.9
 t_episode = 50
 
-def layer_norm(layer, std=1.0, bias_const=0.0):
-    torch.nn.init.orthogonal_(layer.weight, std)
-    torch.nn.init.constant_(layer.bias, bias_const)
 class μNet(nn.Module):
     def __init__(self, low, high):
         super(μNet, self).__init__()
@@ -40,19 +37,13 @@ class μNet(nn.Module):
         self.out.weight.data.normal_(0, 1e-5)   # initialization
         self.tanh = nn.Tanh()
         self.act = nn.LeakyReLU(0.2, inplace=True)
-        
-        layer_norm(self.fc1)
-        layer_norm(self.fc2)
-        layer_norm(self.fc3)
-        layer_norm(self.fc4)
-        layer_norm(self.fc5)
 
     def forward(self, x):
         x = self.act(self.fc1(x))
-        #x = self.act(self.fc2(x))
-        #x = self.act(self.fc3(x))
-        #x = self.act(self.fc4(x))
-        #x = self.act(self.fc5(x))
+        x = self.act(self.fc2(x))
+        x = self.act(self.fc3(x))
+        x = self.act(self.fc4(x))
+        x = self.act(self.fc5(x))
         x = self.out(x)
         for i in range(N_ACTIONS):
             x[:,i] = self.clip(x[:,i], self.low[i],self.high[i])
@@ -78,20 +69,14 @@ class QNet(nn.Module):
         self.out.weight.data.normal_(0, 1e-5)   # initialization
         self.tanh = nn.Tanh()
         self.act = nn.LeakyReLU(0.2, inplace=True)
-        layer_norm(self.fc1)
-        layer_norm(self.fc2)
-        layer_norm(self.out1)
-        layer_norm(self.out2)
-        layer_norm(self.out3)
-        layer_norm(self.out)
 
     def forward(self, x1, x2):
         x1 = self.act(self.fc1(x1))
         x2 = self.act(self.fc2(x2))
         x = torch.cat([x1,x2],dim=1)
-        #x = self.act(self.out1(x))
-        #x = self.act(self.out2(x))
-        #x = self.act(self.out3(x))
+        x = self.act(self.out1(x))
+        x = self.act(self.out2(x))
+        x = self.act(self.out3(x))
         out = self.out(x)
         return out
 
