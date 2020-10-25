@@ -9,23 +9,18 @@ from itertools import count
 
 
 MEMORY_CAPACITY = 5120
-EPSILON = 0.4
+EPSILON = 0.03
 γ = 0.994
 LR = 1e-3
 BATCH_SIZE = 512
-TRAIN_FREQ = 20
-TARGET_REPLACE_ITER = TRAIN_FREQ
+TRAIN_FREQ = 4
+TARGET_REPLACE_ITER = TRAIN_FREQ * 2
 tau = 0.9
 t_episode = 50
 
 def layer_norm(layer, std=1.0, bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
-def list_dic2array(s):
-    # list of dict to array
-    s = [np.concatenate([i for i in j.values()]) for j in s if j!=None]
-    s = np.array(s)
-    return s
 class μNet(nn.Module):
     def __init__(self, low, high):
         super(μNet, self).__init__()
@@ -117,20 +112,21 @@ class TD3(object):
         self.optimQ1 = torch.optim.Adam(trainableQ1, lr=LR, betas=(0.9, 0.95), eps=1e-6, weight_decay=1e-5)
         trainableQ2 = list(filter(lambda p: p.requires_grad, self.Q2.parameters()))
         self.optimQ2 = torch.optim.Adam(trainableQ2, lr=LR, betas=(0.9, 0.95), eps=1e-6, weight_decay=1e-5)
-        self.μ_tar = μNet(low,high)
+        with torch.no_grad():
+            self.μ_tar = μNet(low,high)
+            self.Q1_tar, self.Q2_tar = QNet(), QNet()
         self.μ_tar.to(device)
-        self.Q1_tar, self.Q2_tar = QNet(), QNet()
         self.Q1_tar.to(self.device)
         self.Q2_tar.to(self.device)
         self.μ_tar.load_state_dict(self.μ.state_dict())
         self.Q1_tar.load_state_dict(self.Q1.state_dict())
         self.Q2_tar.load_state_dict(self.Q2.state_dict())
-        self.memory = {"s":[None]*MEMORY_CAPACITY,"a":[np.zeros(N_ACTIONS) for i in range(MEMORY_CAPACITY)],"r":[0.]*MEMORY_CAPACITY,"s_":[None]*MEMORY_CAPACITY}
+        self.memory = torch.zeros((MEMORY_CAPACITY, N_STATES*2+N_ACTIONS+1),device=self.device)
         self.cnt = 0
 
-    def learn(self, st_dic):
+    def learn(self, st):
         # get state $s_t$
-        st = np.concatenate([i for i in st_dic.values()])
+        st = np.concatenate([st["observation"],st["achieved_goal"],st["desired_goal"]])
         st = torch.tensor(st).float().to(self.device).unsqueeze(0)
         
         # compute action with actor μ
@@ -141,30 +137,33 @@ class TD3(object):
         at_np = (at.data.cpu()).numpy()[0]
 
         # step in environment to get next state $s_{t+1}$, reward $r_t$
-        st_, rt, done, info = self.env.step(at_np)
+        st_dic, rt, done, info = self.env.step(at_np)
+        st_ = np.concatenate([st_dic["observation"],st_dic["achieved_goal"],st_dic["desired_goal"]])
+        st_ = torch.tensor(st_).float().to(self.device).unsqueeze(0)
 
         # keep (st, at, rt, st_) in memory
         index = self.cnt % MEMORY_CAPACITY
-        self.memory["s"][index] = st_dic
-        self.memory["a"][index] = at_np
-        self.memory["r"][index] = rt
-        self.memory["s_"][index] = st_
+        self.memory[index,:N_STATES] = st.detach()
+        self.memory[index,N_STATES:N_STATES+N_ACTIONS] = at.detach()
+        self.memory[index,-N_STATES-1] = torch.tensor(rt)
+        self.memory[index,-N_STATES:] = st_
         
         if (self.cnt + 1) % TRAIN_FREQ == 0:
             # randomly sample from memory
             right = self.cnt+1 if self.cnt<MEMORY_CAPACITY else MEMORY_CAPACITY
             random_index = np.random.choice(right, BATCH_SIZE)
             
-            s = list_dic2array(self.memory["s"])[random_index]
-            a = np.array(self.memory["a"])[random_index]
-            r = np.array(self.memory["r"])[random_index]
-            s_ = list_dic2array(self.memory["s_"])[random_index]
+            s = self.memory[random_index,:N_STATES]
+            a = self.memory[random_index,N_STATES:N_STATES+N_ACTIONS]
+            r = self.memory[random_index,-N_STATES-1:-N_STATES]
+            s_ = self.memory[random_index,-N_STATES:]
             
-            self.train(s,a,r,s_)
+            self.update_critic(s,a,r,s_)
         
         # update target network
         if  (self.cnt+1) % TARGET_REPLACE_ITER == 0:
             # update target network
+            self.update_actor(s)
             update_pairs = [(self.μ, self.μ_tar), (self.Q1, self.Q1_tar), (self.Q2, self.Q2_tar)]
             for i, i_tar in update_pairs:
                 p = i.named_parameters()
@@ -176,40 +175,32 @@ class TD3(object):
         # HER replace goal
         if done:
             right = self.cnt % MEMORY_CAPACITY 
-            recall_epi = {"s":[None]*t_episode,"a":[None]*t_episode,"r":[None]*t_episode,"s_":[None]*t_episode}
+            recall_epi = torch.zeros((t_episode, N_STATES*2+N_ACTIONS+1),device=self.device)
             
-            for k in ["s","a","r","s_"]:
-                for i in range(t_episode):
-                    value = self.memory[k][(right-i) % MEMORY_CAPACITY]
-                    recall_epi[k][i] = value if isinstance(value,float) else value.copy()
+            for i in range(t_episode):
+                recall_epi[i] = self.memory[(right-i) % MEMORY_CAPACITY]
 
             # replace goal pos with end effector pos
-            fake_goal = recall_epi["s"][0]["achieved_goal"].copy()
-            for k in ["s","s_"]:
-                for i in range(t_episode):
-                    recall_epi[k][i]["desired_goal"] = fake_goal
-            recall_epi["r"][0] = 0.
+            fake_goal = recall_epi[0,N_STATES-6:N_STATES-3].clone()
+            recall_epi[:,N_STATES-3:N_STATES] = fake_goal
+            recall_epi[:,-3:] = fake_goal
+            recall_epi[0,-N_STATES-1] = 0.
             for i in range(t_episode):
                 self.cnt += 1
-                for k in ["s","a","r","s_"]:
-                    value = recall_epi[k][i]
-                    self.memory[k][self.cnt % MEMORY_CAPACITY] = value if isinstance(value,float) else value.copy()
+                self.memory[self.cnt % MEMORY_CAPACITY] = recall_epi[i]
             
         self.cnt += 1
-        return st_, rt, done
+        return st_dic, rt, done, info
         
-    def train(self, si, ai, ri, si_):
-        si = torch.tensor(si).float().to(self.device)
-        ai = torch.tensor(ai).float().to(self.device)
-        ri = torch.tensor(ri).float().to(self.device).unsqueeze(1)
-        si_ = torch.tensor(si).float().to(self.device)
-        
+    def update_actor(self, si):
         Qm = self.Q1(si, self.μ(si))
         lossμ = -torch.mean(Qm)
         lossμ.backward(retain_graph=True)
         self.optimμ.step()
         self.optimμ.zero_grad()
-
+        self.optimQ1.zero_grad()
+        
+    def update_critic(self,si,ai,ri,si_):
         ai_ = self.μ_tar(si_).detach()
         ai_ += EPSILON*torch.randn(ai_.shape,device=self.device)
         Q1_ = self.Q1_tar(si_,ai_).detach()
@@ -226,9 +217,7 @@ class TD3(object):
         lossQ2 = torch.mean((y-Q2)**2)
         lossQ2.backward()
         self.optimQ2.step()
-        self.optimQ2.zero_grad()
-
-            
+        self.optimQ2.zero_grad()   
     
     def save(self, filename):
         torch.save({'μ':self.μ_tar.state_dict(),
@@ -267,12 +256,12 @@ if __name__=="__main__":
         # run an episode
         done = False
         while not done:
-            env.render()
-            s, reward, done = td3.learn(s)
+            #env.render()
+            s, reward, done, info = td3.learn(s)
+            s_reward += reward
+            n_success += info['is_success']
             if done:
                 break
-        n_success += 1 if (reward==0.) else 0
-        s_reward += reward
         #print("SUCCESS" if done else "FAIL",flush=True)
         
         # collect statistics of #n_samples results
