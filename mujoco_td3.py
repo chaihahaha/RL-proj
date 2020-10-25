@@ -1,14 +1,4 @@
-import pyrobolearn as prl
-from pyrobolearn.envs import Env
-from pyrobolearn.policies import Policy
-from pyrobolearn.rewards.terminal_rewards import TerminalReward
-from pyrobolearn.terminal_conditions import LinkPositionCondition, TerminalCondition
-from pyrobolearn.states.body_states import DistanceState, PositionState, VelocityState
-from pyrobolearn.states import LinkPositionState, JointPositionState, JointVelocityState, LinkWorldPositionState, SensorState
-from pyrobolearn.actions.robot_actions.joint_actions import JointPositionAction
-from pyrobolearn.tasks.reinforcement import RLTask
-from pyrobolearn.rewards.reward import Reward
-from pyrobolearn.robots.sensors import RGBCameraSensor
+import gym
 
 import torch
 import torch.nn as nn
@@ -17,7 +7,7 @@ import numpy as np
 import time
 from itertools import count
 
-N_ACTIONS = 15
+
 MEMORY_CAPACITY = 5120
 EPSILON = 0.4
 γ = 0.994
@@ -26,72 +16,21 @@ BATCH_SIZE = 512
 TRAIN_FREQ = 20
 TARGET_REPLACE_ITER = TRAIN_FREQ
 tau = 0.9
-t_episode = 100
+t_episode = 50
 
 def layer_norm(layer, std=1.0, bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
-    
-class MyCameraState(SensorState):
-    def __init__(self, camera):
-        self._sensor = camera
-        super(MyCameraState, self).__init__(camera)
-    def _read(self):
-        if self._update:
-            self.sensor.sense(apply_noise=True)
-
-        # get the data from the sensor
-        self.data = self.sensor.data.reshape(-1)
-    def _reset(self):
-        self._cnt = 0
-        self._update = False
-        self._sensor.enable()
-        while self._sensor.sense() is None:
-            self._sensor.sense()
-        self._read()
-
-class HasPickedAndLiftedCondition(TerminalCondition):
-    def __init__(self, robot, box, world):
-        self.robot = robot
-        self.box = box
-        self.world = world
-    def check(self):
-        x,y,z = self.world.get_body_position(self.box)
-        return z>0.5
-        
-class HasTouchedCondition(TerminalCondition):
-    def __init__(self, robot, box, world, radius):
-        self.robot = robot
-        self.box = box
-        self.world = world
-        self.radius = radius
-    def check(self):
-        end_effector = self.robot.get_end_effector_ids()[-1]
-        x1,y1,z1 = self.robot.get_link_world_positions(end_effector)
-        x2,y2,z2 = self.world.get_body_position(self.box)
-        dx,dy,dz = x1-x2,y1-y2,z1-z2
-        return dx**2 + dy**2 + dz**2 <=self.radius**2
-        
-class ApproachBoxReward(Reward):
-    def __init__(self, robot, box, world, range=(-np.infty,0)):
-        self.robot = robot
-        self.box = box
-        self.world = world
-        self.range = range
-        
-    def _compute(self):
-        """Compute the reward."""
-        end_effector = self.robot.get_end_effector_ids()[-1]
-        x1,y1,z1 = self.robot.get_link_world_positions(end_effector)
-        x2,y2,z2 = self.world.get_body_position(self.box)
-        dx,dy,dz = x1-x2,y1-y2,z1-z2
-        self.value = -(dx**2+dy**2+dz**2)**0.5
-        return self.value
-        
+def list_dic2array(s):
+    # list of dict to array
+    s = [np.concatenate([i for i in j.values()]) for j in s if j!=None]
+    s = np.array(s)
+    return s
 class μNet(nn.Module):
-    def __init__(self, bounds):
+    def __init__(self, low, high):
         super(μNet, self).__init__()
-        self.bounds = bounds
+        self.low = low
+        self.high = high
         self.fc1 = nn.Linear(N_STATES, 200)
         self.fc1.weight.data.normal_(0, 1e-5)   # initialization
         self.fc2 = nn.Linear(200, 200)
@@ -121,7 +60,7 @@ class μNet(nn.Module):
         x = self.act(self.fc5(x))
         x = self.out(x)
         for i in range(N_ACTIONS):
-            x[:,i] = self.clip(x[:,i], self.bounds[i,0],self.bounds[i,1])
+            x[:,i] = self.clip(x[:,i], self.low[i],self.high[i])
         return x
         
     def clip(self, x, x_min, x_max):
@@ -161,16 +100,13 @@ class QNet(nn.Module):
         out = self.out(x)
         return out
 
-class TD3(Policy):
-    def __init__(self, env, states, actions,robot, device):
-        super(TD3, self).__init__(states, actions)
-        self.robot = robot
+class TD3(object):
+    def __init__(self, env, device):
         self.env = env
-        self.states = states
-        self.actions = actions
-        self.action_data = None
         self.device = device
-        self.μ = μNet(actions.bounds())
+        low = env.action_space.low
+        high = env.action_space.high
+        self.μ = μNet(low,high)
         self.μ.to(device)
         self.Q1, self.Q2 = QNet(), QNet()
         self.Q1.to(self.device)
@@ -181,7 +117,7 @@ class TD3(Policy):
         self.optimQ1 = torch.optim.Adam(trainableQ1, lr=LR, betas=(0.9, 0.95), eps=1e-6, weight_decay=1e-5)
         trainableQ2 = list(filter(lambda p: p.requires_grad, self.Q2.parameters()))
         self.optimQ2 = torch.optim.Adam(trainableQ2, lr=LR, betas=(0.9, 0.95), eps=1e-6, weight_decay=1e-5)
-        self.μ_tar = μNet(actions.bounds())
+        self.μ_tar = μNet(low,high)
         self.μ_tar.to(device)
         self.Q1_tar, self.Q2_tar = QNet(), QNet()
         self.Q1_tar.to(self.device)
@@ -189,12 +125,13 @@ class TD3(Policy):
         self.μ_tar.load_state_dict(self.μ.state_dict())
         self.Q1_tar.load_state_dict(self.Q1.state_dict())
         self.Q2_tar.load_state_dict(self.Q2.state_dict())
-        self.memory = torch.zeros((MEMORY_CAPACITY,N_STATES*2+N_ACTIONS+1),device=self.device)
+        self.memory = {"s":[None]*MEMORY_CAPACITY,"a":[np.zeros(N_ACTIONS) for i in range(MEMORY_CAPACITY)],"r":[0.]*MEMORY_CAPACITY,"s_":[None]*MEMORY_CAPACITY}
         self.cnt = 0
 
-    def learn(self, timeout):
+    def learn(self, st_dic):
         # get state $s_t$
-        st = self.states.vec_torch_data.float().to(self.device).unsqueeze(0)
+        st = np.concatenate([i for i in st_dic.values()])
+        st = torch.tensor(st).float().to(self.device).unsqueeze(0)
         
         # compute action with actor μ
         at = self.μ(st)
@@ -203,31 +140,25 @@ class TD3(Policy):
         # cast to numpy
         at_np = (at.data.cpu()).numpy()[0]
 
-        # apply action
-        self.set_action_data(at_np)
-        self.actions()
-        
         # step in environment to get next state $s_{t+1}$, reward $r_t$
-        st_, rt, done, info = self.env.step()
+        st_, rt, done, info = self.env.step(at_np)
 
-        # cast to tensor
-        st_ = torch.tensor(st_, dtype=torch.float,device=self.device)
-        
         # keep (st, at, rt, st_) in memory
         index = self.cnt % MEMORY_CAPACITY
-        self.memory[index,:N_STATES] = st.detach()
-        self.memory[index,N_STATES:N_STATES+N_ACTIONS] = at.detach()
-        self.memory[index,-N_STATES-1] = torch.tensor(rt)
-        self.memory[index,-N_STATES:] = st_.detach()
+        self.memory["s"][index] = st_dic
+        self.memory["a"][index] = at_np
+        self.memory["r"][index] = rt
+        self.memory["s_"][index] = st_
         
         if (self.cnt + 1) % TRAIN_FREQ == 0:
             # randomly sample from memory
             right = self.cnt+1 if self.cnt<MEMORY_CAPACITY else MEMORY_CAPACITY
             random_index = np.random.choice(right, BATCH_SIZE)
-            s = self.memory[random_index,:N_STATES]
-            a = self.memory[random_index,N_STATES:N_STATES+N_ACTIONS]
-            r = self.memory[random_index,-N_STATES-1:-N_STATES]
-            s_ = self.memory[random_index,-N_STATES:]
+            
+            s = list_dic2array(self.memory["s"])[random_index]
+            a = np.array(self.memory["a"])[random_index]
+            r = np.array(self.memory["r"])[random_index]
+            s_ = list_dic2array(self.memory["s_"])[random_index]
             
             self.train(s,a,r,s_)
         
@@ -243,36 +174,36 @@ class TD3(Policy):
                     d_tar[name].data = tau*param.data + (1-tau) * d_tar[name].data
         
         # HER replace goal
-        if timeout and (not done):
+        if done:
             right = self.cnt % MEMORY_CAPACITY 
-            recall_epi = torch.zeros((t_episode, self.memory.shape[1]))
-            mem = self.memory.detach().clone()
+            recall_epi = {"s":[None]*t_episode,"a":[None]*t_episode,"r":[None]*t_episode,"s_":[None]*t_episode}
             
-            for i in range(t_episode):
-                recall_epi[i,:] = mem[(right-i) % MEMORY_CAPACITY,:]
-                
+            for k in ["s","a","r","s_"]:
+                for i in range(t_episode):
+                    value = self.memory[k][(right-i) % MEMORY_CAPACITY]
+                    recall_epi[k][i] = value if isinstance(value,float) else value.copy()
+
             # replace goal pos with end effector pos
-            s = recall_epi[:,:N_STATES]
-            a = recall_epi[:,N_STATES:N_STATES+N_ACTIONS]
-            r = recall_epi[:,-N_STATES-1:-N_STATES]
-            s_ = recall_epi[:,-N_STATES:]
-            
-            end_effector = self.robot.get_end_effector_ids()[-1]
-            x1,y1,z1 = self.robot.get_link_world_positions(end_effector)
-            fake_goal = torch.tensor([[x1,y1,z1]])
-            
-            s[:,-STATES_SHAPE[-1]:] = fake_goal
-            s_[:,-STATES_SHAPE[-1]:] = fake_goal
-            r[0,0] = 0.
-            recall_epi = torch.cat([s,a,r,s_],1)
+            fake_goal = recall_epi["s"][0]["achieved_goal"].copy()
+            for k in ["s","s_"]:
+                for i in range(t_episode):
+                    recall_epi[k][i]["desired_goal"] = fake_goal
+            recall_epi["r"][0] = 0.
             for i in range(t_episode):
                 self.cnt += 1
-                self.memory[self.cnt % MEMORY_CAPACITY] = recall_epi[i].detach()
+                for k in ["s","a","r","s_"]:
+                    value = recall_epi[k][i]
+                    self.memory[k][self.cnt % MEMORY_CAPACITY] = value if isinstance(value,float) else value.copy()
             
         self.cnt += 1
-        return rt, done
+        return st_, rt, done
         
     def train(self, si, ai, ri, si_):
+        si = torch.tensor(si).float().to(self.device)
+        ai = torch.tensor(ai).float().to(self.device)
+        ri = torch.tensor(ri).float().to(self.device).unsqueeze(1)
+        si_ = torch.tensor(si).float().to(self.device)
+        
         Qm = self.Q1(si, self.μ(si))
         lossμ = -torch.mean(Qm)
         lossμ.backward(retain_graph=True)
@@ -317,26 +248,13 @@ def success(reward):
     return reward >= -0.5
 
 if __name__=="__main__":
-    sim = prl.simulators.Bullet(render=False)
-    world = prl.worlds.BasicWorld(sim)
-    box = world.load_box(position=(0.5,0,0.2),dimensions=(0.1,0.1,0.1),mass=0.1,color=[0,0,1,1])
-    manipulator = world.load_robot('wam')
-    end_effector = manipulator.get_end_effector_ids()[-1]
-    camera = RGBCameraSensor(sim, manipulator, end_effector, 16,16)
-    states = MyCameraState(camera) + LinkWorldPositionState(manipulator) + JointPositionState(manipulator) + JointVelocityState(manipulator) + PositionState(box,world)
-    STATES_SHAPE = [i.shape[0] for i in states()]
-    print(STATES_SHAPE)
+    env=gym.make("FetchReach-v1")
+    s_sample = [v for k,v in env.observation_space.sample().items()]
+    STATES_SHAPE = [v.shape[0] for v in s_sample]
     N_STATES = sum(STATES_SHAPE)
-    action = JointPositionAction(manipulator, kp=manipulator.kp, kd=manipulator.kd)
-    r_cond = HasTouchedCondition(manipulator,box,world,0.5)
-    t_cond = HasTouchedCondition(manipulator,box,world,0.5)
-    reward = TerminalReward(r_cond,subreward=-1,final_reward=0)
-    #reward = ApproachBoxReward(manipulator,box,world)
-    env = Env(world, states, rewards=reward,actions=action,terminal_conditions=t_cond)
-    
-    env.reset()
-    td3 = TD3(env, states, action,manipulator, "cuda")
-    #td3.load("td3.ckpt")
+    N_ACTIONS = env.action_space.sample().shape[0]
+    td3 = TD3(env, "cuda")
+    #td3.load("td3_gym.ckpt")
     num_episodes = 30000
     save_freq = 200
     
@@ -345,17 +263,15 @@ if __name__=="__main__":
     s_reward = 0
     tik = time.time()
     for i in range(1,num_episodes+1):
-        # randomly reset robot joint and box position
-        manipulator.reset_joint_states(np.random.uniform(-1,1,(15)))
-        world.move_object(box,[np.random.uniform(-1,1),np.random.uniform(-1,1),0.2])
-        
+        s = env.reset()
         # run an episode
-        for t in range(t_episode):
-            timeout = t==t_episode-1
-            reward, done = td3.learn(timeout)
+        done = False
+        while not done:
+            env.render()
+            s, reward, done = td3.learn(s)
             if done:
                 break
-        n_success += 1 if done else 0
+        n_success += 1 if (reward==0.) else 0
         s_reward += reward
         #print("SUCCESS" if done else "FAIL",flush=True)
         
@@ -367,7 +283,7 @@ if __name__=="__main__":
             s_reward = 0
             tik = time.time()
         if i%save_freq==0:
-            td3.save("td3.ckpt")
+            td3.save("td3_gym.ckpt")
 #    for i in count():
 #        obs,reward,done,info = env.step()
 #        print(reward)
