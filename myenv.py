@@ -181,9 +181,10 @@ class TD3(Policy):
         self.optimQ1 = torch.optim.Adam(trainableQ1, lr=LR, betas=(0.9, 0.95), eps=1e-6, weight_decay=1e-5)
         trainableQ2 = list(filter(lambda p: p.requires_grad, self.Q2.parameters()))
         self.optimQ2 = torch.optim.Adam(trainableQ2, lr=LR, betas=(0.9, 0.95), eps=1e-6, weight_decay=1e-5)
-        self.μ_tar = μNet(actions.bounds())
+        with torch.no_grad():
+            self.μ_tar = μNet(actions.bounds())
+            self.Q1_tar, self.Q2_tar = QNet(), QNet()
         self.μ_tar.to(device)
-        self.Q1_tar, self.Q2_tar = QNet(), QNet()
         self.Q1_tar.to(self.device)
         self.Q2_tar.to(self.device)
         self.μ_tar.load_state_dict(self.μ.state_dict())
@@ -278,6 +279,7 @@ class TD3(Policy):
         lossμ.backward(retain_graph=True)
         self.optimμ.step()
         self.optimμ.zero_grad()
+        self.optimQ1.zero_grad()
 
         ai_ = self.μ_tar(si_).detach()
         ai_ += EPSILON*torch.randn(ai_.shape,device=self.device)
