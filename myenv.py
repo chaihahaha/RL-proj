@@ -2,12 +2,11 @@ import pyrobolearn as prl
 from pyrobolearn.envs import Env
 from pyrobolearn.policies import Policy
 from pyrobolearn.states.body_states import DistanceState, PositionState, VelocityState
-from pyrobolearn.states import JointPositionState, JointVelocityState, LinkWorldPositionState
-from pyrobolearn.actions.robot_actions.joint_actions import JointPositionChangeAction
+from pyrobolearn.states import JointPositionState, JointVelocityState, LinkWorldPositionState, LinkWorldVelocityState
+from pyrobolearn.actions import JointPositionChangeAction
 
 import torch
 import torch.nn as nn
-from torch.nn.functional import normalize
 
 import numpy as np
 import time
@@ -70,18 +69,11 @@ class μNet(nn.Module):
         
 
     def forward(self, x):
-        shape = [0] + STATES_SHAPE
-        shape = np.cumsum(shape)
-        x_list = []
-        for i in range(len(shape)-1):
-            norm = nn.LayerNorm(shape[i+1]-shape[i], elementwise_affine=False)
-            x_list.append(norm(x[:,shape[i]:shape[i+1]]))
-        x = torch.cat(x_list,dim=1)
-        x = self.norm(self.act(self.fc1(x)))
-        x = self.norm(self.act(self.fc2(x)))
-        x = self.norm(self.act(self.fc3(x)))
-        x = self.norm(self.act(self.fc4(x)))
-        x = self.norm(self.act(self.fc5(x)))
+        x = self.act(self.fc1(x))
+        x = self.act(self.fc2(x))
+        x = self.act(self.fc3(x))
+        x = self.act(self.fc4(x))
+        x = self.act(self.fc5(x))
         x = self.out(x)
         x = self.tanh(x) * self.max_action
         return x
@@ -107,21 +99,12 @@ class QNet(nn.Module):
         self.act = nn.LeakyReLU(0.2, inplace=True)
 
     def forward(self, x1, x2):
-        shape = [0] + STATES_SHAPE
-        shape = np.cumsum(shape)
-        x1_list = []
-        for i in range(len(shape)-1):
-            norm = nn.LayerNorm(shape[i+1]-shape[i], elementwise_affine=False)
-            x1_list.append(norm(x1[:,shape[i]:shape[i+1]]))
-        x1 = torch.cat(x1_list,dim=1)
-        norm = nn.LayerNorm(x2.shape[1], elementwise_affine=False)
-        x2 = norm(x2)
         x = torch.cat([x1,x2/self.max_action],dim=1)
-        x = self.norm(self.act(self.fc1(x)))
-        x = self.norm(self.act(self.fc2(x)))
-        x = self.norm(self.act(self.fc3(x)))
-        x = self.norm(self.act(self.fc4(x)))
-        x = self.norm(self.act(self.fc5(x)))
+        x = self.act(self.fc1(x))
+        x = self.act(self.fc2(x))
+        x = self.act(self.fc3(x))
+        x = self.act(self.fc4(x))
+        x = self.act(self.fc5(x))
         out = self.out(x)
         return out
 
@@ -321,11 +304,12 @@ if __name__=="__main__":
     box = world.load_box(position=(0.5,0,0.2),dimensions=(0.1,0.1,0.1),mass=0.1,color=[0,0,1,1])
     manipulator = world.load_robot('wam')
     end_effector = manipulator.get_end_effector_ids()[-1]
-    states = LinkWorldPositionState(manipulator, link_ids=end_effector) + JointPositionState(manipulator) + JointVelocityState(manipulator) + PositionState(box,world)
+    other_links = manipulator.get_end_effector_ids()[:-1] + manipulator.get_link_ids()
+    states = LinkWorldPositionState(manipulator, link_ids=end_effector) + LinkWorldVelocityState(manipulator, link_ids=end_effector) + LinkWorldPositionState(manipulator, link_ids=other_links) + PositionState(box,world)
     STATES_SHAPE = [i.shape[0] for i in states()]
     print(STATES_SHAPE)
     N_STATES = sum(STATES_SHAPE)
-    action = JointPositionChangeAction(manipulator, kp=manipulator.kp, kd=manipulator.kd)
+    action = JointPositionChangeAction(manipulator)
     env = Env(world, states,actions=action)
     
     env.reset()
