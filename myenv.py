@@ -299,7 +299,7 @@ def success(reward):
     return reward >= -0.5
 
 if __name__=="__main__":
-    sim = prl.simulators.Bullet(render=False)
+    sim = prl.simulators.Bullet(render=True)
     world = prl.worlds.BasicWorld(sim)
     box = world.load_box(position=(0.5,0,0.2),dimensions=(0.1,0.1,0.1),mass=0.1,color=[0,0,1,1])
     manipulator = world.load_robot('wam')
