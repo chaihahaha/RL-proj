@@ -1,13 +1,9 @@
 import pyrobolearn as prl
 from pyrobolearn.envs import Env
 from pyrobolearn.policies import Policy
-from pyrobolearn.rewards.terminal_rewards import TerminalReward
-from pyrobolearn.terminal_conditions import LinkPositionCondition, TerminalCondition
 from pyrobolearn.states.body_states import DistanceState, PositionState, VelocityState
 from pyrobolearn.states import JointPositionState, JointVelocityState, LinkWorldPositionState
 from pyrobolearn.actions.robot_actions.joint_actions import JointPositionChangeAction
-from pyrobolearn.tasks.reinforcement import RLTask
-from pyrobolearn.rewards.reward import Reward
 
 import torch
 import torch.nn as nn
@@ -20,12 +16,12 @@ from itertools import count
 N_ACTIONS = 15
 MEMORY_CAPACITY = int(1e5)
 NOISE_EPSILON = 0.1
-RAND_EPSILON = 0.1
-ACTION_L2 = 1
-γ = 0.999
+RAND_EPSILON = 0.3
+ACTION_L2 = 0.5
+γ = 0.991
 LR = 1e-3
 BATCH_SIZE = 512
-TRAIN_FREQ = 20
+TRAIN_FREQ = 2
 TARGET_REPLACE_ITER = TRAIN_FREQ * 2
 polyak = 0.95
 t_episode = 100
@@ -53,9 +49,9 @@ def approach_box_reward(end_effector_pos, box_pos):
     return value
         
 class μNet(nn.Module):
-    def __init__(self, bounds):
+    def __init__(self, max_action):
         super(μNet, self).__init__()
-        self.bounds = bounds
+        self.max_action = max_action
         self.fc1 = nn.Linear(N_STATES, 200)
         self.fc1.weight.data.normal_(0, 1e-5)   # initialization
         self.fc2 = nn.Linear(200, 200)
@@ -68,61 +64,64 @@ class μNet(nn.Module):
         self.fc5.weight.data.normal_(0, 1e-5)   # initialization
         self.out = nn.Linear(200, N_ACTIONS)
         self.out.weight.data.normal_(0, 1e-5)   # initialization
+        self.norm = nn.LayerNorm(200, elementwise_affine=False)
         self.tanh = nn.Tanh()
         self.act = nn.LeakyReLU(0.2, inplace=True)
+        
 
     def forward(self, x):
-#        shape = [0] + STATES_SHAPE
-#        shape = np.cumsum(shape)
-#        x_list = []
-#        for i in range(len(shape)-1):
-#            x_list.append(normalize(x[:,shape[i]:shape[i+1]]))
-#        x = torch.cat(x_list,dim=1)
-        x = self.act(self.fc1(x))
-        x = self.act(self.fc2(x))
-        x = self.act(self.fc3(x))
-        x = self.act(self.fc4(x))
-        x = self.act(self.fc5(x))
+        shape = [0] + STATES_SHAPE
+        shape = np.cumsum(shape)
+        x_list = []
+        for i in range(len(shape)-1):
+            norm = nn.LayerNorm(shape[i+1]-shape[i], elementwise_affine=False)
+            x_list.append(norm(x[:,shape[i]:shape[i+1]]))
+        x = torch.cat(x_list,dim=1)
+        x = self.norm(self.act(self.fc1(x)))
+        x = self.norm(self.act(self.fc2(x)))
+        x = self.norm(self.act(self.fc3(x)))
+        x = self.norm(self.act(self.fc4(x)))
+        x = self.norm(self.act(self.fc5(x)))
         x = self.out(x)
-#        for i in range(N_ACTIONS):
-#            x[:,i] = self.clip(x[:,i], self.bounds[i,0],self.bounds[i,1])
+        x = self.tanh(x) * self.max_action
         return x
         
-    def clip(self, x, x_min, x_max):
-        return x_min + (x_max-x_min)*(self.tanh(x)+1)/2
-        
 class QNet(nn.Module):
-    def __init__(self):
+    def __init__(self, max_action):
         super(QNet, self).__init__()
-        self.fc1 = nn.Linear(N_STATES, 200)
+        self.max_action = max_action
+        self.fc1 = nn.Linear(N_STATES + N_ACTIONS, 300)
         self.fc1.weight.data.normal_(0, 1e-5)   # initialization
-        self.fc2 = nn.Linear(N_ACTIONS, 100)
+        self.fc2 = nn.Linear(300, 300)
         self.fc2.weight.data.normal_(0, 1e-5)   # initialization
-        self.out1 = nn.Linear(300, 300)
-        self.out1.weight.data.normal_(0, 1e-5)   # initialization
-        self.out2 = nn.Linear(300, 300)
-        self.out2.weight.data.normal_(0, 1e-5)   # initialization
-        self.out3 = nn.Linear(300, 300)
-        self.out3.weight.data.normal_(0, 1e-5)   # initialization
+        self.fc3 = nn.Linear(300, 300)
+        self.fc3.weight.data.normal_(0, 1e-5)   # initialization
+        self.fc4 = nn.Linear(300, 300)
+        self.fc4.weight.data.normal_(0, 1e-5)   # initialization
+        self.fc5 = nn.Linear(300, 300)
+        self.fc5.weight.data.normal_(0, 1e-5)   # initialization
         self.out = nn.Linear(300, 1)
         self.out.weight.data.normal_(0, 1e-5)   # initialization
+        self.norm = nn.LayerNorm(300, elementwise_affine=False)
         self.tanh = nn.Tanh()
         self.act = nn.LeakyReLU(0.2, inplace=True)
 
     def forward(self, x1, x2):
-#        shape = [0] + STATES_SHAPE
-#        shape = np.cumsum(shape)
-#        x1_list = []
-#        for i in range(len(shape)-1):
-#            x1_list.append(normalize(x1[:,shape[i]:shape[i+1]]))
-#        x1 = torch.cat(x1_list,dim=1)
-#        x2 = normalize(x2)
-        x1 = self.act(self.fc1(x1))
-        x2 = self.act(self.fc2(x2))
-        x = torch.cat([x1,x2],dim=1)
-        x = self.act(self.out1(x))
-        x = self.act(self.out2(x))
-        x = self.act(self.out3(x))
+        shape = [0] + STATES_SHAPE
+        shape = np.cumsum(shape)
+        x1_list = []
+        for i in range(len(shape)-1):
+            norm = nn.LayerNorm(shape[i+1]-shape[i], elementwise_affine=False)
+            x1_list.append(norm(x1[:,shape[i]:shape[i+1]]))
+        x1 = torch.cat(x1_list,dim=1)
+        norm = nn.LayerNorm(x2.shape[1], elementwise_affine=False)
+        x2 = norm(x2)
+        x = torch.cat([x1,x2/self.max_action],dim=1)
+        x = self.norm(self.act(self.fc1(x)))
+        x = self.norm(self.act(self.fc2(x)))
+        x = self.norm(self.act(self.fc3(x)))
+        x = self.norm(self.act(self.fc4(x)))
+        x = self.norm(self.act(self.fc5(x)))
         out = self.out(x)
         return out
 
@@ -136,9 +135,10 @@ class TD3(Policy):
         self.actions = actions
         self.action_data = None
         self.device = device
-        self.μ = μNet(actions.bounds())
+        self.max_action = np.max(np.abs(actions.bounds()))
+        self.μ = μNet(self.max_action)
         self.μ.to(device)
-        self.Q1, self.Q2 = QNet(), QNet()
+        self.Q1, self.Q2 = QNet(self.max_action), QNet(self.max_action)
         self.Q1.to(self.device)
         self.Q2.to(self.device)
         trainableμ = list(filter(lambda p: p.requires_grad, self.μ.parameters()))
@@ -148,8 +148,8 @@ class TD3(Policy):
         trainableQ2 = list(filter(lambda p: p.requires_grad, self.Q2.parameters()))
         self.optimQ2 = torch.optim.Adam(trainableQ2, lr=LR)
         with torch.no_grad():
-            self.μ_tar = μNet(actions.bounds())
-            self.Q1_tar, self.Q2_tar = QNet(), QNet()
+            self.μ_tar = μNet(self.max_action)
+            self.Q1_tar, self.Q2_tar = QNet(self.max_action), QNet(self.max_action)
         self.μ_tar.to(device)
         self.Q1_tar.to(self.device)
         self.Q2_tar.to(self.device)
@@ -163,8 +163,9 @@ class TD3(Policy):
         # get state $s_t$
         st = self.states.vec_torch_data.float().to(self.device).unsqueeze(0)
         # compute action with actor μ
-        at = self.μ(st)
+        at = self.μ(st).detach()
         at += NOISE_EPSILON*torch.randn(at.shape,device=self.device)
+        #print(self.Q1(st,at).cpu()[0,0])
         
         # cast to numpy
         if np.random.uniform() < RAND_EPSILON:
@@ -218,10 +219,8 @@ class TD3(Policy):
         if timeout:
             right = self.cnt % MEMORY_CAPACITY 
             recall_epi = torch.zeros((t_episode, self.memory.shape[1]))
-            mem = self.memory.detach().clone()
-            
             for i in range(t_episode):
-                recall_epi[i,:] = mem[(right-i) % MEMORY_CAPACITY,:]
+                recall_epi[i,:] = self.memory[(right-i) % MEMORY_CAPACITY,:]
                 
             # replace goal pos with end effector pos
             s = recall_epi[:,:N_STATES]
@@ -232,7 +231,7 @@ class TD3(Policy):
             fake_goal = torch.tensor(self.states()[0])
             # make z pos of fake goal real
             fake_goal[-1] = 0.05
-            assert len(fake_goal)==3
+            assert fake_goal.shape==torch.Size([3,])
             
             s[:,-STATES_SHAPE[-1]:] = fake_goal
             s_[:,-STATES_SHAPE[-1]:] = fake_goal
@@ -247,38 +246,31 @@ class TD3(Policy):
         return rt, done
         
     def update_actor(self, si):
-        assert si.shape == torch.Size([BATCH_SIZE, N_STATES])
-        am = self.μ(si)
-        assert am.shape == torch.Size([BATCH_SIZE, N_ACTIONS])
-        Qm = self.Q1(si, am)
-        assert Qm.shape == torch.Size([BATCH_SIZE, 1])
-        lossμ = -torch.mean(Qm) + ACTION_L2 * torch.mean(am**2)
-        assert lossμ.shape == torch.Size([])
+        ai = self.μ(si)
+        Q1 = self.Q1(si, ai)
+        lossμ = -torch.mean(Q1) + ACTION_L2 * torch.mean(ai**2)
         lossμ.backward(retain_graph=True)
         self.optimμ.step()
         self.optimμ.zero_grad()
         self.optimQ1.zero_grad()
         self.optimQ2.zero_grad()
         
-    def update_critic(self,si,ai,ri,si_):
         assert si.shape == torch.Size([BATCH_SIZE, N_STATES])
         assert ai.shape == torch.Size([BATCH_SIZE, N_ACTIONS])
-        assert ri.shape == torch.Size([BATCH_SIZE, 1])
-        assert si_.shape == torch.Size([BATCH_SIZE, N_STATES])
+        assert Q1.shape == torch.Size([BATCH_SIZE, 1])
+        assert lossμ.shape == torch.Size([])
+        
+    def update_critic(self,si,ai,ri,si_):
         ai_ = self.μ_tar(si_).detach()
         ai_ += NOISE_EPSILON*torch.randn(ai_.shape,device=self.device)
-        assert ai_.shape == torch.Size([BATCH_SIZE, N_ACTIONS])
+        
         Q1_ = self.Q1_tar(si_,ai_).detach()
         Q2_ = self.Q2_tar(si_,ai_).detach()
-        assert Q1_.shape == torch.Size([BATCH_SIZE, 1])
-        assert Q2_.shape == torch.Size([BATCH_SIZE, 1])
-        y = ri + γ * torch.min(Q1_, Q2_)
-        assert y.shape == torch.Size([BATCH_SIZE, 1])
         
-        Q1 = self.Q1(si, ai)
-        assert Q1.shape == torch.Size([BATCH_SIZE, 1])
+        y = ri + γ * torch.min(Q1_, Q2_)
+
+        Q1 = self.Q1(si, ai) 
         lossQ1 = torch.mean((y-Q1)**2)
-        assert lossQ1.shape == torch.Size([])
         lossQ1.backward()
         self.optimQ1.step()
         self.optimμ.zero_grad()
@@ -286,14 +278,25 @@ class TD3(Policy):
         self.optimQ2.zero_grad()
         
         Q2 = self.Q2(si, ai)
-        assert Q2.shape == torch.Size([BATCH_SIZE, 1])
         lossQ2 = torch.mean((y-Q2)**2)
-        assert lossQ2.shape == torch.Size([])
         lossQ2.backward()
         self.optimQ2.step()
         self.optimμ.zero_grad()
         self.optimQ1.zero_grad()
         self.optimQ2.zero_grad()
+        
+        assert si.shape == torch.Size([BATCH_SIZE, N_STATES])
+        assert ai.shape == torch.Size([BATCH_SIZE, N_ACTIONS])
+        assert ri.shape == torch.Size([BATCH_SIZE, 1])
+        assert si_.shape == torch.Size([BATCH_SIZE, N_STATES])
+        assert ai_.shape == torch.Size([BATCH_SIZE, N_ACTIONS])
+        assert Q1_.shape == torch.Size([BATCH_SIZE, 1])
+        assert Q2_.shape == torch.Size([BATCH_SIZE, 1])
+        assert y.shape == torch.Size([BATCH_SIZE, 1])
+        assert Q1.shape == torch.Size([BATCH_SIZE, 1])
+        assert lossQ1.shape == torch.Size([])
+        assert Q2.shape == torch.Size([BATCH_SIZE, 1])
+        assert lossQ2.shape == torch.Size([])
 
     def save(self, filename):
         torch.save({'μ':self.μ_tar.state_dict(),
@@ -313,7 +316,7 @@ def success(reward):
     return reward >= -0.5
 
 if __name__=="__main__":
-    sim = prl.simulators.Bullet(render=True)
+    sim = prl.simulators.Bullet(render=False)
     world = prl.worlds.BasicWorld(sim)
     box = world.load_box(position=(0.5,0,0.2),dimensions=(0.1,0.1,0.1),mass=0.1,color=[0,0,1,1])
     manipulator = world.load_robot('wam')
@@ -332,7 +335,7 @@ if __name__=="__main__":
     num_episodes = 30000
     save_freq = 200
     
-    n_samples = 20
+    n_samples = 50
     n_success = 0
     s_reward = 0
     tik = time.time()
