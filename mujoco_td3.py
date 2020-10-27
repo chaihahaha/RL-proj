@@ -14,10 +14,9 @@ RAND_EPSILON = 0.3
 ACTION_L2 = 0.5
 γ = 0.981
 LR = 1e-3
-BATCH_SIZE = 40
-tau = 0.9
+BATCH_SIZE = 128
+tau = 0.05
 t_episode = 50
-n_batches = 40
 
 class μNet(nn.Module):
     def __init__(self, max_action):
@@ -139,51 +138,54 @@ class TD3(object):
         self.memory[index,t_step,-N_STATES-1] = mask
         self.memory[index,t_step,-N_STATES:] = st_.detach()
         
+
+        # randomly sample from memory
+        right = self.cnt_epi+1 if self.cnt_epi<MEMORY_CAPACITY else MEMORY_CAPACITY
+        right_t = self.cnt_step+1 if self.cnt_step<t_episode else t_episode
+        random_index = np.random.choice(right, BATCH_SIZE)
+        s = self.memory[random_index,:right_t,:N_STATES].flatten(0,1)
+        a = self.memory[random_index,:right_t,N_STATES:N_STATES+N_ACTIONS].flatten(0,1)
+        r = self.memory[random_index,:right_t,-N_STATES-2:-N_STATES-1].flatten(0,1)
+        mask = self.memory[random_index,:right_t,-N_STATES-1:-N_STATES].flatten(0,1)
+        s_ = self.memory[random_index,:right_t,-N_STATES:].flatten(0,1)
+        
+        lq1, lq2 = self.update_critic(s,a,r,mask,s_)
+        lossQ1 += lq1
+        lossQ2 += lq2
+        
+        lossμ += self.update_actor(s)
+    
+        update_pairs = [(self.μ, self.μ_tar), (self.Q1, self.Q1_tar), (self.Q2, self.Q2_tar)]
+        for i, i_tar in update_pairs:
+            p = i.named_parameters()
+            p_tar = i_tar.named_parameters()
+            d_tar = dict(p_tar)
+            for name, param in p:
+                d_tar[name].data = tau*param.data + (1-tau) * d_tar[name].data
         if done:
-            for i in range(n_batches):
-                # randomly sample from memory
-                right = self.cnt_epi+1 if self.cnt_epi<MEMORY_CAPACITY else MEMORY_CAPACITY
-                random_index = np.random.choice(right, BATCH_SIZE)
-                s = self.memory[random_index,:,:N_STATES].flatten(0,1)
-                a = self.memory[random_index,:,N_STATES:N_STATES+N_ACTIONS].flatten(0,1)
-                r = self.memory[random_index,:,-N_STATES-2:-N_STATES-1].flatten(0,1)
-                mask = self.memory[random_index,:,-N_STATES-1:-N_STATES].flatten(0,1)
-                s_ = self.memory[random_index,:,-N_STATES:].flatten(0,1)
-                
-                lq1, lq2 = self.update_critic(s,a,r,mask,s_)
-                lossQ1 += lq1
-                lossQ2 += lq2
-                
-                lossμ += self.update_actor(s)
-        
-            update_pairs = [(self.μ, self.μ_tar), (self.Q1, self.Q1_tar), (self.Q2, self.Q2_tar)]
-            for i, i_tar in update_pairs:
-                p = i.named_parameters()
-                p_tar = i_tar.named_parameters()
-                d_tar = dict(p_tar)
-                for name, param in p:
-                    d_tar[name].data = tau*param.data + (1-tau) * d_tar[name].data
-        
             # HER replace goal
             recall_epi = self.memory[self.cnt_epi % MEMORY_CAPACITY]
 
             # replace goal pos with end effector pos
-            fake_goal = recall_epi[0,N_STATES-6:N_STATES-3].clone()
+            fake_goal = recall_epi[-1,-6:-3].clone()
             recall_epi[:,N_STATES-3:N_STATES] = fake_goal
             recall_epi[:,-3:] = fake_goal
             for i in range(t_episode):
                 recall_epi[i,-N_STATES-2] = torch.tensor(self.env.compute_reward(achieved_goal=recall_epi[i,-6:-3].cpu(), desired_goal=fake_goal.cpu(), info=info))    
             self.cnt_epi += 1
-            self.memory[self.cnt_epi % MEMORY_CAPACITY] = recall_epi[i].detach()
+            self.memory[self.cnt_epi % MEMORY_CAPACITY] = recall_epi
             self.cnt_epi += 1
             
         self.cnt_step += 1
-        return st_dic, rt, done, info, lossμ/n_batches, lossQ1/n_batches, lossQ2/n_batches
+        return st_dic, rt, done, info, lossμ, lossQ1, lossQ2
         
     def update_actor(self, si):
         ai = self.μ(si)
         Q1 = self.Q1(si, ai)
         lossμ = -torch.mean(Q1) + ACTION_L2 * torch.mean(ai**2)
+        self.optimμ.zero_grad()
+        self.optimQ1.zero_grad()
+        self.optimQ2.zero_grad()
         lossμ.backward()
         self.optimμ.step()
         self.optimμ.zero_grad()
@@ -204,6 +206,9 @@ class TD3(object):
 
         Q1 = self.Q1(si, ai) 
         lossQ1 = torch.mean((y-Q1)**2)
+        self.optimμ.zero_grad()
+        self.optimQ1.zero_grad()
+        self.optimQ2.zero_grad()
         lossQ1.backward()
         self.optimQ1.step()
         self.optimμ.zero_grad()
@@ -212,6 +217,9 @@ class TD3(object):
         
         Q2 = self.Q2(si, ai)
         lossQ2 = torch.mean((y-Q2)**2)
+        self.optimμ.zero_grad()
+        self.optimQ1.zero_grad()
+        self.optimQ2.zero_grad()
         lossQ2.backward()
         self.optimQ2.step()
         self.optimμ.zero_grad()

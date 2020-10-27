@@ -21,7 +21,7 @@ ACTION_L2 = 0.5
 LR = 1e-3
 BATCH_SIZE = 128
 TARGET_REPLACE_IER = 20
-polyak = 0.95
+polyak = 0.05
 t_episode = 100
 
 def picked_and_lifted_reward(box_pos):
