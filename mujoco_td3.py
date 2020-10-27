@@ -9,7 +9,7 @@ from itertools import count
 
 NOISE_EPSILON = 0.1
 MEMORY_CAPACITY = 5120
-EPSILON = 0.1
+EPSILON = 0.01
 RAND_EPSILON = 0.3
 ACTION_L2 = 0.5
 γ = 0.981
@@ -20,10 +20,9 @@ t_episode = 50
 n_batches = 40
 
 class μNet(nn.Module):
-    def __init__(self, low, high):
+    def __init__(self, max_action):
         super(μNet, self).__init__()
-        self.low = low
-        self.high = high
+        self.max_action = max_action
         self.fc1 = nn.Linear(N_STATES, 300)
         self.fc1.weight.data.normal_(0, 1e-5)   # initialization
         self.fc2 = nn.Linear(300, 300)
@@ -46,12 +45,8 @@ class μNet(nn.Module):
         #x = self.act(self.fc4(x))
         #x = self.act(self.fc5(x))
         x = self.out(x)
-        for i in range(N_ACTIONS):
-            x[:,i] = self.clip(x[:,i], self.low[i],self.high[i])
+        x = self.tanh(x) * self.max_action
         return x
-        
-    def clip(self, x, x_min, x_max):
-        return x_min + (x_max-x_min)*(self.tanh(x)+1)/2
         
 class QNet(nn.Module):
     def __init__(self):
@@ -87,7 +82,8 @@ class TD3(object):
         self.device = device
         low = env.action_space.low
         high = env.action_space.high
-        self.μ = μNet(low,high)
+        self.max_action = np.max(high)
+        self.μ = μNet(self.max_action)
         self.μ.to(device)
         self.Q1, self.Q2 = QNet(), QNet()
         self.Q1.to(self.device)
@@ -99,7 +95,7 @@ class TD3(object):
         trainableQ2 = list(filter(lambda p: p.requires_grad, self.Q2.parameters()))
         self.optimQ2 = torch.optim.Adam(trainableQ2, lr=LR)
         with torch.no_grad():
-            self.μ_tar = μNet(low,high)
+            self.μ_tar = μNet(self.max_action)
             self.Q1_tar, self.Q2_tar = QNet(), QNet()
         self.μ_tar.to(device)
         self.Q1_tar.to(self.device)
@@ -263,7 +259,7 @@ if __name__=="__main__":
         # run an episode
         done = False
         while not done:
-            #env.render()
+#            env.render()
             s, reward, done, info, lossμ, lossQ1, lossQ2 = td3.learn(s)
             sum_lossμ += lossμ
             sum_lossQ1 += lossQ1
