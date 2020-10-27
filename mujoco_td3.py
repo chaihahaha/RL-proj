@@ -246,13 +246,16 @@ if __name__=="__main__":
         s = env.reset()
         # run an episode
         done = False
+        flag_success = False
         while not done:
             #env.render()
             s, reward, done, info = td3.learn(s)
             s_reward += reward
-            n_success += info['is_success']
+            if info['is_success']:
+                flag_success = True
             if done:
                 break
+        n_success += 1 if flag_success else 0
         #print("SUCCESS" if done else "FAIL",flush=True)
         
         # collect statistics of #n_samples results
