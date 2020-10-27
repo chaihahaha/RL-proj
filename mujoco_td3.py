@@ -10,11 +10,11 @@ from itertools import count
 
 MEMORY_CAPACITY = 5120
 EPSILON = 0.1
-γ = 0.996
+γ = 0.981
 LR = 1e-3
 BATCH_SIZE = 512
-TRAIN_FREQ = 1
-TARGET_REPLACE_ITER = TRAIN_FREQ 
+TRAIN_FREQ = 10
+TARGET_REPLACE_ITER = TRAIN_FREQ *10
 tau = 0.9
 t_episode = 50
 
@@ -23,27 +23,27 @@ class μNet(nn.Module):
         super(μNet, self).__init__()
         self.low = low
         self.high = high
-        self.fc1 = nn.Linear(N_STATES, 200)
+        self.fc1 = nn.Linear(N_STATES, 300)
         self.fc1.weight.data.normal_(0, 1e-5)   # initialization
-        self.fc2 = nn.Linear(200, 200)
+        self.fc2 = nn.Linear(300, 300)
         self.fc2.weight.data.normal_(0, 1e-5)   # initialization
-        self.fc3 = nn.Linear(200, 200)
+        self.fc3 = nn.Linear(300, 300)
         self.fc3.weight.data.normal_(0, 1e-5)   # initialization
-        self.fc4 = nn.Linear(200, 200)
+        self.fc4 = nn.Linear(300, 300)
         self.fc4.weight.data.normal_(0, 1e-5)   # initialization
-        self.fc5 = nn.Linear(200, 200)
+        self.fc5 = nn.Linear(300, 300)
         self.fc5.weight.data.normal_(0, 1e-5)   # initialization
-        self.out = nn.Linear(200, N_ACTIONS)
+        self.out = nn.Linear(300, N_ACTIONS)
         self.out.weight.data.normal_(0, 1e-5)   # initialization
         self.tanh = nn.Tanh()
-        self.act = nn.LeakyReLU(0.2, inplace=True)
+        self.act = nn.ReLU()
 
     def forward(self, x):
         x = self.act(self.fc1(x))
         x = self.act(self.fc2(x))
-        x = self.act(self.fc3(x))
-        x = self.act(self.fc4(x))
-        x = self.act(self.fc5(x))
+        #x = self.act(self.fc3(x))
+        #x = self.act(self.fc4(x))
+        #x = self.act(self.fc5(x))
         x = self.out(x)
         for i in range(N_ACTIONS):
             x[:,i] = self.clip(x[:,i], self.low[i],self.high[i])
@@ -55,9 +55,9 @@ class μNet(nn.Module):
 class QNet(nn.Module):
     def __init__(self):
         super(QNet, self).__init__()
-        self.fc1 = nn.Linear(N_STATES, 200)
+        self.fc1 = nn.Linear(N_STATES+N_ACTIONS, 300)
         self.fc1.weight.data.normal_(0, 1e-5)   # initialization
-        self.fc2 = nn.Linear(N_ACTIONS, 100)
+        self.fc2 = nn.Linear(300, 300)
         self.fc2.weight.data.normal_(0, 1e-5)   # initialization
         self.out1 = nn.Linear(300, 300)
         self.out1.weight.data.normal_(0, 1e-5)   # initialization
@@ -68,15 +68,15 @@ class QNet(nn.Module):
         self.out = nn.Linear(300, 1)
         self.out.weight.data.normal_(0, 1e-5)   # initialization
         self.tanh = nn.Tanh()
-        self.act = nn.LeakyReLU(0.2, inplace=True)
+        self.act = nn.ReLU()
 
     def forward(self, x1, x2):
-        x1 = self.act(self.fc1(x1))
-        x2 = self.act(self.fc2(x2))
         x = torch.cat([x1,x2],dim=1)
-        x = self.act(self.out1(x))
-        x = self.act(self.out2(x))
-        x = self.act(self.out3(x))
+        x = self.act(self.fc1(x))
+        x = self.act(self.fc2(x))
+        #x = self.act(self.out1(x))
+        #x = self.act(self.out2(x))
+        #x = self.act(self.out3(x))
         out = self.out(x)
         return out
 
@@ -92,11 +92,11 @@ class TD3(object):
         self.Q1.to(self.device)
         self.Q2.to(self.device)
         trainableμ = list(filter(lambda p: p.requires_grad, self.μ.parameters()))
-        self.optimμ = torch.optim.Adam(trainableμ, lr=LR, betas=(0.9, 0.95), eps=1e-6, weight_decay=1e-5)
+        self.optimμ = torch.optim.Adam(trainableμ, lr=LR)
         trainableQ1 = list(filter(lambda p: p.requires_grad, self.Q1.parameters()))
-        self.optimQ1 = torch.optim.Adam(trainableQ1, lr=LR, betas=(0.9, 0.95), eps=1e-6, weight_decay=1e-5)
+        self.optimQ1 = torch.optim.Adam(trainableQ1, lr=LR)
         trainableQ2 = list(filter(lambda p: p.requires_grad, self.Q2.parameters()))
-        self.optimQ2 = torch.optim.Adam(trainableQ2, lr=LR, betas=(0.9, 0.95), eps=1e-6, weight_decay=1e-5)
+        self.optimQ2 = torch.optim.Adam(trainableQ2, lr=LR)
         with torch.no_grad():
             self.μ_tar = μNet(low,high)
             self.Q1_tar, self.Q2_tar = QNet(), QNet()
@@ -147,8 +147,13 @@ class TD3(object):
         
         # update target network
         if  (self.cnt+1) % TARGET_REPLACE_ITER == 0:
-            # update target network
+            # randomly sample from memory
+            right = self.cnt+1 if self.cnt<MEMORY_CAPACITY else MEMORY_CAPACITY
+            random_index = np.random.choice(right, BATCH_SIZE)
+            s = self.memory[random_index,:N_STATES]
             self.update_actor(s)
+            
+            # update target network
             update_pairs = [(self.μ, self.μ_tar), (self.Q1, self.Q1_tar), (self.Q2, self.Q2_tar)]
             for i, i_tar in update_pairs:
                 p = i.named_parameters()
@@ -157,22 +162,23 @@ class TD3(object):
                 for name, param in p:
                     d_tar[name].data = tau*param.data + (1-tau) * d_tar[name].data
         
-        # HER replace goal (buggy: overwriting real goal)
-#        if done:
-#            right = self.cnt % MEMORY_CAPACITY 
-#            recall_epi = torch.zeros((t_episode, N_STATES*2+N_ACTIONS+1),device=self.device)
-#            
-#            for i in range(t_episode):
-#                recall_epi[i] = self.memory[(right-i) % MEMORY_CAPACITY]
+        # HER replace goal
+        if done:
+            right = self.cnt % MEMORY_CAPACITY 
+            recall_epi = torch.zeros((t_episode, N_STATES*2+N_ACTIONS+1),device=self.device)
+            
+            for i in range(t_episode):
+                recall_epi[i] = self.memory[(right-i) % MEMORY_CAPACITY]
 
-#            # replace goal pos with end effector pos
-#            fake_goal = recall_epi[0,N_STATES-6:N_STATES-3].clone()
-#            recall_epi[:,N_STATES-3:N_STATES] = fake_goal
-#            recall_epi[:,-3:] = fake_goal
-#            recall_epi[0,-N_STATES-1] = 0.
-#            for i in range(t_episode):
-#                self.cnt += 1
-#                self.memory[self.cnt % MEMORY_CAPACITY] = recall_epi[i]
+            # replace goal pos with end effector pos
+            fake_goal = recall_epi[0,N_STATES-6:N_STATES-3].clone()
+            recall_epi[:,N_STATES-3:N_STATES] = fake_goal
+            recall_epi[:,-3:] = fake_goal
+            for i in range(t_episode):
+                recall_epi[i,-N_STATES-1] = torch.tensor(self.env.compute_reward(achieved_goal=recall_epi[i,-6:-3].cpu(), desired_goal=fake_goal.cpu(), info=info))
+            for i in range(t_episode):
+                self.cnt += 1
+                self.memory[self.cnt % MEMORY_CAPACITY] = recall_epi[i]
             
         self.cnt += 1
         return st_dic, rt, done, info
@@ -180,7 +186,7 @@ class TD3(object):
     def update_actor(self, si):
         Qm = self.Q1(si, self.μ(si))
         lossμ = -torch.mean(Qm)
-        lossμ.backward(retain_graph=True)
+        lossμ.backward()
         self.optimμ.step()
         self.optimμ.zero_grad()
         self.optimQ1.zero_grad()
