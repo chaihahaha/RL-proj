@@ -205,7 +205,7 @@ class TD3(Policy):
                         d_tar[name].data = polyak*param.data + (1-polyak) * d_tar[name].data
         
             # HER replace goal
-            recall_epi = self.memory[self.cnt_epi % MEMORY_CAPACITY]
+            recall_epi = self.memory[self.cnt_epi % MEMORY_CAPACITY].clone()
             # replace goal pos with end effector pos
             s = recall_epi[:,:N_STATES]
             a = recall_epi[:,N_STATES:N_STATES+N_ACTIONS]
@@ -225,7 +225,7 @@ class TD3(Policy):
             recall_epi = torch.cat([s,a,r,mask,s_],1)
             
             self.cnt_epi += 1
-            self.memory[self.cnt_epi % MEMORY_CAPACITY] = recall_epi[i].detach()
+            self.memory[self.cnt_epi % MEMORY_CAPACITY] = recall_epi.clone()
             self.cnt_epi += 1
             
             
