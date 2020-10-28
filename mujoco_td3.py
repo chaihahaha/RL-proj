@@ -14,7 +14,7 @@ RAND_EPSILON = 0.3
 ACTION_L2 = 0.0
 γ = 0.99
 LR = 3e-4
-BATCH_SIZE = 128
+BATCH_SIZE = 8
 tau = 0.005
 t_episode = 50
 policy_freq = 2
@@ -95,9 +95,8 @@ class TD3(object):
         self.optimQ1 = torch.optim.Adam(trainableQ1, lr=LR)
         trainableQ2 = list(filter(lambda p: p.requires_grad, self.Q2.parameters()))
         self.optimQ2 = torch.optim.Adam(trainableQ2, lr=LR)
-        with torch.no_grad():
-            self.μ_tar = μNet(self.max_action)
-            self.Q1_tar, self.Q2_tar = QNet(), QNet()
+        self.μ_tar = μNet(self.max_action)
+        self.Q1_tar, self.Q2_tar = QNet(), QNet()
         self.μ_tar.to(device)
         self.Q1_tar.to(self.device)
         self.Q2_tar.to(self.device)
@@ -115,16 +114,15 @@ class TD3(object):
         st = np.concatenate([st["observation"],st["achieved_goal"],st["desired_goal"]])
         st = torch.tensor(st).float().to(self.device).unsqueeze(0)
         
-        # compute action with actor μ
-        at = self.μ(st)
-        noise = (torch.randn_like(at)*NOISE_EPSILON).clamp(-NOISE_CLIP,NOISE_CLIP)
-        at = (at + noise).clamp(-self.max_action, self.max_action)
-        
         # cast to numpy
         if np.random.uniform() < RAND_EPSILON or self.cnt_step < start_timesteps:
             at_np = self.env.action_space.sample()
         else:
-            
+            # compute action with actor μ
+            with torch.no_grad():
+                at = self.μ(st)
+            noise = (torch.randn_like(at)*NOISE_EPSILON).clamp(-NOISE_CLIP,NOISE_CLIP)
+            at = (at + noise).clamp(-self.max_action, self.max_action)
             at_np = at.detach().cpu().numpy()[0]
 
         # step in environment to get next state $s_{t+1}$, reward $r_t$
@@ -146,11 +144,13 @@ class TD3(object):
             # randomly sample from memory
             right = self.cnt_epi if self.cnt_epi<MEMORY_CAPACITY else MEMORY_CAPACITY
             random_index = np.random.choice(right, BATCH_SIZE)
-            s = self.memory[random_index,:,:N_STATES].flatten(0,1)
-            a = self.memory[random_index,:,N_STATES:N_STATES+N_ACTIONS].flatten(0,1)
-            r = self.memory[random_index,:,-N_STATES-2:-N_STATES-1].flatten(0,1)
-            mask = self.memory[random_index,:,-N_STATES-1:-N_STATES].flatten(0,1)
-            s_ = self.memory[random_index,:,-N_STATES:].flatten(0,1)
+            mem = self.memory[random_index].flatten(0,1)
+            s = mem[:,:N_STATES]
+            a = mem[:,N_STATES:N_STATES+N_ACTIONS]
+            r = mem[:,-N_STATES-2:-N_STATES-1]
+            mask = mem[:,-N_STATES-1:-N_STATES]
+            s_ = mem[:,-N_STATES:]
+            
             
             lq1, lq2 = self.update_critic(s,a,r,mask,s_)
             lossQ1 += lq1
@@ -212,7 +212,7 @@ class TD3(object):
             Q2_ = self.Q2_tar(si_,ai_)
         
         y = ri + mask * torch.min(Q1_, Q2_)
-
+        
         Q1 = self.Q1(si, ai) 
         lossQ1 = torch.mean((y-Q1)**2)
         self.optimμ.zero_grad()
