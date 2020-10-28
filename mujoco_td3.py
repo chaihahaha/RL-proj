@@ -7,32 +7,34 @@ import numpy as np
 import time
 from itertools import count
 
-NOISE_EPSILON = 0.1
+NOISE_EPSILON = 0.2
+NOISE_CLIP = 0.5
 MEMORY_CAPACITY = 5120
-EPSILON = 0.01
 RAND_EPSILON = 0.3
-ACTION_L2 = 0.5
-γ = 0.981
-LR = 1e-3
+ACTION_L2 = 0.0
+γ = 0.99
+LR = 3e-4
 BATCH_SIZE = 128
-tau = 0.05
+tau = 0.005
 t_episode = 50
+policy_freq = 2
+start_timesteps = 25e3
 
 class μNet(nn.Module):
     def __init__(self, max_action):
         super(μNet, self).__init__()
         self.max_action = max_action
-        self.fc1 = nn.Linear(N_STATES, 300)
+        self.fc1 = nn.Linear(N_STATES, 256)
         self.fc1.weight.data.normal_(0, 1e-5)   # initialization
-        self.fc2 = nn.Linear(300, 300)
+        self.fc2 = nn.Linear(256, 256)
         self.fc2.weight.data.normal_(0, 1e-5)   # initialization
-        self.fc3 = nn.Linear(300, 300)
+        self.fc3 = nn.Linear(256, 256)
         self.fc3.weight.data.normal_(0, 1e-5)   # initialization
-        self.fc4 = nn.Linear(300, 300)
+        self.fc4 = nn.Linear(256, 256)
         self.fc4.weight.data.normal_(0, 1e-5)   # initialization
-        self.fc5 = nn.Linear(300, 300)
+        self.fc5 = nn.Linear(256, 256)
         self.fc5.weight.data.normal_(0, 1e-5)   # initialization
-        self.out = nn.Linear(300, N_ACTIONS)
+        self.out = nn.Linear(256, N_ACTIONS)
         self.out.weight.data.normal_(0, 1e-5)   # initialization
         self.tanh = nn.Tanh()
         self.act = nn.ReLU()
@@ -50,17 +52,17 @@ class μNet(nn.Module):
 class QNet(nn.Module):
     def __init__(self):
         super(QNet, self).__init__()
-        self.fc1 = nn.Linear(N_STATES+N_ACTIONS, 300)
+        self.fc1 = nn.Linear(N_STATES+N_ACTIONS, 256)
         self.fc1.weight.data.normal_(0, 1e-5)   # initialization
-        self.fc2 = nn.Linear(300, 300)
+        self.fc2 = nn.Linear(256, 256)
         self.fc2.weight.data.normal_(0, 1e-5)   # initialization
-        self.out1 = nn.Linear(300, 300)
+        self.out1 = nn.Linear(256, 256)
         self.out1.weight.data.normal_(0, 1e-5)   # initialization
-        self.out2 = nn.Linear(300, 300)
+        self.out2 = nn.Linear(256, 256)
         self.out2.weight.data.normal_(0, 1e-5)   # initialization
-        self.out3 = nn.Linear(300, 300)
+        self.out3 = nn.Linear(256, 256)
         self.out3.weight.data.normal_(0, 1e-5)   # initialization
-        self.out = nn.Linear(300, 1)
+        self.out = nn.Linear(256, 1)
         self.out.weight.data.normal_(0, 1e-5)   # initialization
         self.tanh = nn.Tanh()
         self.act = nn.ReLU()
@@ -115,13 +117,15 @@ class TD3(object):
         
         # compute action with actor μ
         at = self.μ(st)
-        at += EPSILON*torch.randn(at.shape,device=self.device)
+        noise = (torch.randn_like(at)*NOISE_EPSILON).clamp(-NOISE_CLIP,NOISE_CLIP)
+        at = (at + noise).clamp(-self.max_action, self.max_action)
         
         # cast to numpy
-        if np.random.uniform() < RAND_EPSILON:
+        if np.random.uniform() < RAND_EPSILON or self.cnt_step < start_timesteps:
             at_np = self.env.action_space.sample()
         else:
-            at_np = (at.data.cpu()).numpy()[0]
+            
+            at_np = at.detach().cpu().numpy()[0]
 
         # step in environment to get next state $s_{t+1}$, reward $r_t$
         st_dic, rt, done, info = self.env.step(at_np)
@@ -138,33 +142,33 @@ class TD3(object):
         self.memory[index,t_step,-N_STATES-1] = mask
         self.memory[index,t_step,-N_STATES:] = st_.detach()
         
-
-        # randomly sample from memory
-        right = self.cnt_epi+1 if self.cnt_epi<MEMORY_CAPACITY else MEMORY_CAPACITY
-        right_t = self.cnt_step+1 if self.cnt_step<t_episode else t_episode
-        random_index = np.random.choice(right, BATCH_SIZE)
-        s = self.memory[random_index,:right_t,:N_STATES].flatten(0,1)
-        a = self.memory[random_index,:right_t,N_STATES:N_STATES+N_ACTIONS].flatten(0,1)
-        r = self.memory[random_index,:right_t,-N_STATES-2:-N_STATES-1].flatten(0,1)
-        mask = self.memory[random_index,:right_t,-N_STATES-1:-N_STATES].flatten(0,1)
-        s_ = self.memory[random_index,:right_t,-N_STATES:].flatten(0,1)
+        if self.cnt_step>start_timesteps:
+            # randomly sample from memory
+            right = self.cnt_epi if self.cnt_epi<MEMORY_CAPACITY else MEMORY_CAPACITY
+            random_index = np.random.choice(right, BATCH_SIZE)
+            s = self.memory[random_index,:,:N_STATES].flatten(0,1)
+            a = self.memory[random_index,:,N_STATES:N_STATES+N_ACTIONS].flatten(0,1)
+            r = self.memory[random_index,:,-N_STATES-2:-N_STATES-1].flatten(0,1)
+            mask = self.memory[random_index,:,-N_STATES-1:-N_STATES].flatten(0,1)
+            s_ = self.memory[random_index,:,-N_STATES:].flatten(0,1)
+            
+            lq1, lq2 = self.update_critic(s,a,r,mask,s_)
+            lossQ1 += lq1
+            lossQ2 += lq2
+            
+            if self.cnt_step % policy_freq == 0:
+                lossμ += self.update_actor(s)
         
-        lq1, lq2 = self.update_critic(s,a,r,mask,s_)
-        lossQ1 += lq1
-        lossQ2 += lq2
-        
-        lossμ += self.update_actor(s)
-    
-        update_pairs = [(self.μ, self.μ_tar), (self.Q1, self.Q1_tar), (self.Q2, self.Q2_tar)]
-        for i, i_tar in update_pairs:
-            p = i.named_parameters()
-            p_tar = i_tar.named_parameters()
-            d_tar = dict(p_tar)
-            for name, param in p:
-                d_tar[name].data = tau*param.data + (1-tau) * d_tar[name].data
+            update_pairs = [(self.μ, self.μ_tar), (self.Q1, self.Q1_tar), (self.Q2, self.Q2_tar)]
+            for i, i_tar in update_pairs:
+                p = i.named_parameters()
+                p_tar = i_tar.named_parameters()
+                d_tar = dict(p_tar)
+                for name, param in p:
+                    d_tar[name].data = tau*param.data + (1-tau) * d_tar[name].data
         if done:
             # HER replace goal
-            recall_epi = self.memory[self.cnt_epi % MEMORY_CAPACITY]
+            recall_epi = self.memory[self.cnt_epi % MEMORY_CAPACITY].clone()
 
             # replace goal pos with end effector pos
             fake_goal = recall_epi[-1,-6:-3].clone()
@@ -174,6 +178,10 @@ class TD3(object):
                 recall_epi[i,-N_STATES-2] = torch.tensor(self.env.compute_reward(achieved_goal=recall_epi[i,-6:-3].cpu(), desired_goal=fake_goal.cpu(), info=info))    
             self.cnt_epi += 1
             self.memory[self.cnt_epi % MEMORY_CAPACITY] = recall_epi
+#            print("HER replaced")
+#            print(self.memory[self.cnt_epi % MEMORY_CAPACITY, -1,:])
+#            print("Original")
+#            print(self.memory[(self.cnt_epi-1) % MEMORY_CAPACITY, -1,:])
             self.cnt_epi += 1
             
         self.cnt_step += 1
@@ -197,7 +205,8 @@ class TD3(object):
     def update_critic(self,si,ai,ri,mask,si_):
         with torch.no_grad():
             ai_ = self.μ_tar(si_)
-            ai_ += NOISE_EPSILON*torch.randn(ai_.shape,device=self.device)
+            noise = (torch.randn_like(ai_)*NOISE_EPSILON).clamp(-NOISE_CLIP,NOISE_CLIP)
+            ai_ = (ai_ + noise).clamp(-self.max_action, self.max_action)
         
             Q1_ = self.Q1_tar(si_,ai_)
             Q2_ = self.Q2_tar(si_,ai_)
@@ -250,6 +259,8 @@ if __name__=="__main__":
     STATES_SHAPE = [v.shape[0] for v in s_sample]
     N_STATES = sum(STATES_SHAPE)
     N_ACTIONS = env.action_space.sample().shape[0]
+    print(STATES_SHAPE)
+    print(N_ACTIONS)
     td3 = TD3(env, "cuda")
     #td3.load("td3_gym.ckpt")
     num_episodes = 30000
@@ -281,7 +292,7 @@ if __name__=="__main__":
         # collect statistics of #n_samples results
         if i%n_samples==0:
             tok = time.time()
-            print("Epoch {}\tSuc rate: {:.2f}\tAvg reward: {:.2f}\tLossμ:{:.3f}\tLossQ1:{:.3f}\tLossQ2:{:.3f}\tTime: {:.1f}".format(int(i/n_samples),n_success/n_samples,s_reward/n_samples,sum_lossμ/n_samples, sum_lossQ1/n_samples, sum_lossQ2/n_samples, tok-tik),flush=True)
+            print("Epoch {}\tSuc rate: {:.2f}\tAvg reward: {:.2f}\tLossμ:{:.3f}\tLossQ1:{:.3f}\tLossQ2:{:.3f}\tTime: {:.1f}".format(int(i/n_samples),n_success/n_samples,s_reward/n_samples,sum_lossμ/n_samples/policy_freq, sum_lossQ1/n_samples, sum_lossQ2/n_samples, tok-tik),flush=True)
             sum_lossμ = 0
             sum_lossQ1 = 0
             sum_lossQ2 = 0
