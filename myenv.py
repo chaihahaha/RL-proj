@@ -17,17 +17,17 @@ BUFFER_SIZE = int(5e3)
 NOISE_EPSILON = 0.2
 NOISE_CLIP = 0.5
 RAND_EPSILON = 0.3
-ACTION_L2 = 0.5
-LR = 3e-4
+ACTION_L2 = 1.0
+LR = 1e-3
 BATCH_SIZE = 64
-EPI_BATCH_SIZE = 8
 N_BATCHES = 40
 TARGET_REPLACE_ITER = 1
-DELAY_ACTOR_ITER = 2
+DELAY_ACTOR_ITER = 1
 polyak = 0.005
 t_episode = 64
 γ = 1-1/t_episode
 start_timesteps = 25e3
+REPLAY_K = 4
         
 def picked_and_lifted_reward(box_pos):
     assert len(box_pos) == 3
@@ -158,9 +158,9 @@ class μNet(nn.Module):
     def forward(self, x):
         x = self.act(self.fc1(x))
         x = self.act(self.fc2(x))
-        #x = self.act(self.fc3(x))
-        #x = self.act(self.fc4(x))
-        #x = self.act(self.fc5(x))
+        x = self.act(self.fc3(x))
+        x = self.act(self.fc4(x))
+        x = self.act(self.fc5(x))
         x = self.out(x)
         x = self.tanh(x) * self.max_action
         return x
@@ -189,9 +189,9 @@ class QNet(nn.Module):
         x = torch.cat([x1,x2/self.max_action],dim=1)
         x = self.act(self.fc1(x))
         x = self.act(self.fc2(x))
-        #x = self.act(self.fc3(x))
-        #x = self.act(self.fc4(x))
-        #x = self.act(self.fc5(x))
+        x = self.act(self.fc3(x))
+        x = self.act(self.fc4(x))
+        x = self.act(self.fc5(x))
         out = self.tanh(self.out(x))/(1-γ)
         return out
 
@@ -225,9 +225,8 @@ class TD3(Policy):
         self.μ_tar.load_state_dict(self.μ.state_dict())
         self.Q1_tar.load_state_dict(self.Q1.state_dict())
         self.Q2_tar.load_state_dict(self.Q2.state_dict())
-        self.replay_buffer = ReplayBuffer(N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, 3, reward, device)
+        self.replay_buffer = ReplayBuffer(N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, device)
         self.cnt_step = 0
-        self.cnt_epi = 0
         self.lossμ, self.lossQ1, self.lossQ2 = 0,0,0
 
     def learn(self, done):
@@ -252,13 +251,13 @@ class TD3(Policy):
         st_ = torch.tensor(st_, dtype=torch.float,device=self.device)
         
         # keep (st, at, rt, st_) in memory
-        self.store_transition(st, at_np, rt, 0. if done else γ, st_)
+        self.replay_buffer.store(st, at_np, rt, 0. if done else γ, st_)
         
         if done and self.cnt_step>start_timesteps:
             for _ in range(N_BATCHES):
                 self.train()
             
-            if (self.cnt_step//(t_episode+1)//2) % TARGET_REPLACE_ITER == 0:
+            if (self.cnt_step//t_episode) % TARGET_REPLACE_ITER == 0:
                 self.update_target()
             
             
@@ -281,16 +280,10 @@ class TD3(Policy):
         self.lossQ1 += lq1
         self.lossQ2 += lq2
         
-        if (self.cnt_step//(t_episode+1)//2) % DELAY_ACTOR_ITER == 0:
+        if (self.cnt_step//t_episode) % DELAY_ACTOR_ITER == 0:
             self.lossμ += self.update_actor(s)
         return
             
-    def sample_transition(self,batch_size):
-        return s, a, r, mask, s_
-        
-    def store_transition(self,st, at_np, rt, mask, st_):
-        self.replay_buffer.store(st, at_np, rt, mask, st_)
-        return 
         
     def get_action(self, st):
         st = st.unsqueeze(0)
@@ -385,7 +378,7 @@ if __name__=="__main__":
     num_episodes = 30000
     save_freq = 200
     
-    n_samples = 10
+    n_cycles = 50
     n_success = 0
     s_reward = 0
     sum_lossμ = 0
@@ -408,10 +401,10 @@ if __name__=="__main__":
         n_success += 1 if success(reward) else 0
         #print("SUCCESS" if done else "FAIL",flush=True)
         
-        # collect statistics of #n_samples results
-        if i%n_samples==0:
+        # collect statistics of #n_cycles results
+        if i%n_cycles==0:
             tok = time.time()
-            print("Epoch {}\tSuc rate: {:.2f}\tAvg reward: {:.2f}\tLossμ:{:.3f}\tLossQ1:{:.3f}\tLossQ2:{:.3f}\tTime: {:.1f}".format(int(i/n_samples),n_success/n_samples,s_reward/n_samples,sum_lossμ/DELAY_ACTOR_ITER/2/n_samples, sum_lossQ1/n_samples, sum_lossQ2/n_samples, tok-tik),flush=True)
+            print("Epoch {}\tSuc rate: {:.2f}\tAvg reward: {:.2f}\tLossμ:{:.3f}\tLossQ1:{:.3f}\tLossQ2:{:.3f}\tTime: {:.1f}".format(int(i/n_cycles),n_success/n_cycles,s_reward/n_cycles,sum_lossμ/n_cycles, sum_lossQ1/n_cycles, sum_lossQ2/n_cycles, tok-tik),flush=True)
             sum_lossμ = 0
             sum_lossQ1 = 0
             sum_lossQ2 = 0
