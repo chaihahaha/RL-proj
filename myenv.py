@@ -14,17 +14,17 @@ import time
 from itertools import count
 
 BUFFER_SIZE = int(5e3)
-NOISE_EPSILON = 0.2
+NOISE_EPSILON = 1
 NOISE_CLIP = 0.5
 RAND_EPSILON = 0.3
 ACTION_L2 = 1.0
 LR = 1e-3
 BATCH_SIZE = 64
-N_BATCHES = 40
+N_BATCHES = 1
 TARGET_REPLACE_ITER = 1
-DELAY_ACTOR_ITER = 1
+DELAY_ACTOR_ITER = 2
 polyak = 0.005
-t_episode = 64
+t_episode = 100
 γ = 1-1/t_episode
 start_timesteps = 25e3
 REPLAY_K = 4
@@ -95,7 +95,7 @@ class ReplayBuffer(object):
     def sample(self, batch_size):
 
         # Select which episodes and time steps to use.
-        right = min(self.cnt//self.t_episode , BUFFER_SIZE)
+        right = min(self.cnt//self.t_episode - 1, BUFFER_SIZE)
         episode_idxs = np.random.randint(0, right, batch_size)
         t_samples = np.random.randint(self.t_episode, size=batch_size)
         
@@ -159,8 +159,8 @@ class μNet(nn.Module):
         x = self.act(self.fc1(x))
         x = self.act(self.fc2(x))
         x = self.act(self.fc3(x))
-        x = self.act(self.fc4(x))
-        x = self.act(self.fc5(x))
+        #x = self.act(self.fc4(x))
+        #x = self.act(self.fc5(x))
         x = self.out(x)
         x = self.tanh(x) * self.max_action
         return x
@@ -190,8 +190,8 @@ class QNet(nn.Module):
         x = self.act(self.fc1(x))
         x = self.act(self.fc2(x))
         x = self.act(self.fc3(x))
-        x = self.act(self.fc4(x))
-        x = self.act(self.fc5(x))
+        #x = self.act(self.fc4(x))
+        #x = self.act(self.fc5(x))
         out = self.tanh(self.out(x))/(1-γ)
         return out
 
@@ -253,7 +253,7 @@ class TD3(Policy):
         # keep (st, at, rt, st_) in memory
         self.replay_buffer.store(st, at_np, rt, 0. if done else γ, st_)
         
-        if done and self.cnt_step>start_timesteps:
+        if self.cnt_step>start_timesteps:
             for _ in range(N_BATCHES):
                 self.train()
             
