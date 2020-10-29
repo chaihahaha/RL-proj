@@ -13,15 +13,16 @@ import numpy as np
 import time
 from itertools import count
 
-MEMORY_CAPACITY = int(5e3)
+BUFFER_SIZE = int(5e3)
 NOISE_EPSILON = 0.2
 NOISE_CLIP = 0.5
 RAND_EPSILON = 0.3
 ACTION_L2 = 0.5
 LR = 3e-4
-BATCH_SIZE = 8
+BATCH_SIZE = 64
 EPI_BATCH_SIZE = 8
-TARGET_REPLACE_ITER = 2
+N_BATCHES = 40
+TARGET_REPLACE_ITER = 1
 DELAY_ACTOR_ITER = 2
 polyak = 0.005
 t_episode = 64
@@ -49,6 +50,89 @@ def approach_box_reward(end_effector_pos, box_pos):
     dx,dy,dz = x1-x2,y1-y2,z1-z2
     value = -(dx**2+dy**2+dz**2)**0.5
     return value
+        
+class ReplayBuffer(object):
+    def __init__(self, obs_dim, ag_dim, dg_dim, a_dim, r_dim, mask_dim, t_episode, replay_k, reward, device):
+        self.device = device
+        self.reward = reward
+        self.obs_dim, self.ag_dim, self.dg_dim, self.a_dim, self.r_dim, self.mask_dim = obs_dim, ag_dim, dg_dim, a_dim, r_dim, mask_dim
+        self.t_episode = t_episode
+        self.sobs = torch.zeros((BUFFER_SIZE,t_episode, obs_dim), device=device)
+        self.sag = torch.zeros((BUFFER_SIZE,t_episode, ag_dim), device=device)
+        self.sdg = torch.zeros((BUFFER_SIZE,t_episode, dg_dim), device=device)
+        
+        self.s_obs = torch.zeros((BUFFER_SIZE,t_episode, obs_dim), device=device)
+        self.s_ag = torch.zeros((BUFFER_SIZE,t_episode, ag_dim), device=device)
+        self.s_dg = torch.zeros((BUFFER_SIZE,t_episode, dg_dim), device=device)
+        
+        self.a = torch.zeros((BUFFER_SIZE,t_episode, a_dim), device=device)
+        
+        self.r = torch.zeros((BUFFER_SIZE,t_episode, r_dim), device=device)
+        
+        self.mask = torch.zeros((BUFFER_SIZE,t_episode, mask_dim), device=device)
+        self.future_p = 1 - (1. / (1 + replay_k))
+        self.cnt = 0
+        
+    def store(self, s, a, r, mask, s_):
+        s, s_ = s.detach(), s_.detach()
+        index = (self.cnt // t_episode) % BUFFER_SIZE
+        t_step = self.cnt % t_episode
+        self.sobs[index,t_step] = s[:self.obs_dim]
+        self.sag[index,t_step] = s[self.obs_dim:-self.dg_dim]
+        self.sdg[index,t_step] = s[-self.dg_dim:]
+        
+        self.a[index,t_step] = torch.tensor(a)
+        self.r[index,t_step] = torch.tensor(r)
+        
+        self.mask[index,t_step] = mask
+        
+        self.s_obs[index,t_step] = s_[:self.obs_dim]
+        self.s_ag[index,t_step] = s_[self.obs_dim:-self.dg_dim]
+        self.s_dg[index,t_step] = s_[-self.dg_dim:]
+        self.cnt += 1
+        return
+        
+    def sample(self, batch_size):
+
+        # Select which episodes and time steps to use.
+        right = min(self.cnt//self.t_episode , BUFFER_SIZE)
+        episode_idxs = np.random.randint(0, right, batch_size)
+        t_samples = np.random.randint(self.t_episode, size=batch_size)
+        
+        sobs = self.sobs[episode_idxs, t_samples].clone()
+        sag = self.sag[episode_idxs, t_samples].clone()
+        sdg = self.sdg[episode_idxs, t_samples].clone()
+        
+        a = self.a[episode_idxs, t_samples].clone()
+        r = self.r[episode_idxs, t_samples].clone()
+        
+        mask = self.mask[episode_idxs, t_samples].clone()
+        
+        s_obs = self.s_obs[episode_idxs, t_samples].clone()
+        s_ag = self.s_ag[episode_idxs, t_samples].clone()
+        s_dg = self.s_dg[episode_idxs, t_samples].clone()
+
+        # Select future time indexes proportional with probability future_p. These
+        # will be used for HER replay by substituting in future goals.
+        her_indexes = np.where(np.random.uniform(size=batch_size) < self.future_p)
+        future_offset = np.random.uniform(size=batch_size) * (self.t_episode - t_samples)
+        future_offset = future_offset.astype(int)
+        future_t = (t_samples + future_offset)[her_indexes]
+
+        # Replace goal with achieved goal but only for the previously-selected
+        # HER transitions (as defined by her_indexes). For the other transitions,
+        # keep the original goal.
+        future_ag = self.sag[episode_idxs[her_indexes], future_t]
+        sdg[her_indexes] = future_ag
+        s_dg[her_indexes] = future_ag
+        
+        for i in range(len(r)):
+            r[i] = self.reward(sag[i], sdg[i])
+        
+        s = torch.cat([sobs, sag, sdg], 1)
+        s_ = torch.cat([s_obs, s_ag, s_dg], 1)
+        return s, a, r, mask, s_
+        
         
 class μNet(nn.Module):
     def __init__(self, max_action):
@@ -141,15 +225,16 @@ class TD3(Policy):
         self.μ_tar.load_state_dict(self.μ.state_dict())
         self.Q1_tar.load_state_dict(self.Q1.state_dict())
         self.Q2_tar.load_state_dict(self.Q2.state_dict())
-        self.memory = torch.zeros((MEMORY_CAPACITY,t_episode,N_STATES*2+N_ACTIONS+2),device=self.device)
+        self.replay_buffer = ReplayBuffer(N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, 3, reward, device)
         self.cnt_step = 0
         self.cnt_epi = 0
+        self.lossμ, self.lossQ1, self.lossQ2 = 0,0,0
 
     def learn(self, done):
-        lossμ, lossQ1, lossQ2 = 0,0,0
+        self.lossμ, self.lossQ1, self.lossQ2 = 0,0,0
         
         # get state $s_t$
-        st = self.states.vec_torch_data.float().to(self.device).unsqueeze(0)
+        st = self.states.vec_torch_data.float().to(self.device)
         
         # get action $a_t$
         at_np = self.get_action(st)
@@ -160,8 +245,8 @@ class TD3(Policy):
         
         # step in environment to get next state $s_{t+1}$, reward $r_t$
         st_, _, _, info = self.env.step()
-        # take first state as achieved goal, take last state as desired goal
-        rt = self.reward(self.states()[0],self.states()[-1])
+        # take last but one state as achieved goal, take last state as desired goal
+        rt = self.reward(self.states()[-2],self.states()[-1])
 
         # cast to tensor
         st_ = torch.tensor(st_, dtype=torch.float,device=self.device)
@@ -169,74 +254,46 @@ class TD3(Policy):
         # keep (st, at, rt, st_) in memory
         self.store_transition(st, at_np, rt, 0. if done else γ, st_)
         
-        if self.cnt_step>start_timesteps:
-            # randomly sample from memory
-            right = min(self.cnt_epi , MEMORY_CAPACITY)
-            random_epi_index = np.random.choice(right, EPI_BATCH_SIZE)
-            random_t_index = np.random.choice(t_episode, BATCH_SIZE)
-            mem = self.memory[random_epi_index, :]
-            mem = mem[:, random_t_index].flatten(0,1)
-            s = mem[:,:N_STATES]
-            a = mem[:,N_STATES:N_STATES+N_ACTIONS]
-            r = mem[:,-N_STATES-2:-N_STATES-1]
-            mask = mem[:,-N_STATES-1:-N_STATES]
-            s_ = mem[:,-N_STATES:]
-                
-            lq1, lq2 = self.update_critic(s,a,r,mask,s_)
-            lossQ1 += lq1
-            lossQ2 += lq2
+        if done and self.cnt_step>start_timesteps:
+            for _ in range(N_BATCHES):
+                self.train()
             
-            if self.cnt_step % DELAY_ACTOR_ITER == 0:
-                lossμ += self.update_actor(s)
-            
-            if self.cnt_step % TARGET_REPLACE_ITER == 0:
-                update_pairs = [(self.μ, self.μ_tar), (self.Q1, self.Q1_tar), (self.Q2, self.Q2_tar)]
-                for i, i_tar in update_pairs:
-                    p = i.named_parameters()
-                    p_tar = i_tar.named_parameters()
-                    d_tar = dict(p_tar)
-                    for name, param in p:
-                        d_tar[name].data = polyak*param.data + (1-polyak) * d_tar[name].data
-        if done:
-            # HER replace goal
-            recall_epi = self.memory[self.cnt_epi % MEMORY_CAPACITY].clone()
-            # replace goal pos with end effector pos
-            s = recall_epi[:,:N_STATES]
-            a = recall_epi[:,N_STATES:N_STATES+N_ACTIONS]
-            r = torch.zeros((t_episode, 1), device=self.device)
-            mask = recall_epi[:,-N_STATES-1:-N_STATES]
-            s_ = recall_epi[:,-N_STATES:]
-            
-            fake_goal = torch.tensor(self.states()[0])
-            # make z pos of fake goal real
-            #fake_goal[-1] = 0.05
-            assert fake_goal.shape==torch.Size([3,])
-            
-            s[:,-STATES_SHAPE[-1]:] = fake_goal
-            s_[:,-STATES_SHAPE[-1]:] = fake_goal
-            for i in range(t_episode):
-                r[i, 0] = self.reward(s_[i, :STATES_SHAPE[0]], fake_goal)
-            recall_epi = torch.cat([s,a,r,mask,s_],1)
-            
-            self.cnt_epi += 1
-            self.memory[self.cnt_epi % MEMORY_CAPACITY] = recall_epi.clone()
-            self.cnt_epi += 1
+            if (self.cnt_step//(t_episode+1)//2) % TARGET_REPLACE_ITER == 0:
+                self.update_target()
             
             
         self.cnt_step += 1
-        return rt, lossμ, lossQ1, lossQ2
+        return rt, self.lossμ*DELAY_ACTOR_ITER/N_BATCHES, self.lossQ1/N_BATCHES, self.lossQ2/N_BATCHES
+        
+    def update_target(self):
+        update_pairs = [(self.μ, self.μ_tar), (self.Q1, self.Q1_tar), (self.Q2, self.Q2_tar)]
+        for i, i_tar in update_pairs:
+            p = i.named_parameters()
+            p_tar = i_tar.named_parameters()
+            d_tar = dict(p_tar)
+            for name, param in p:
+                d_tar[name].data = polyak*param.data + (1-polyak) * d_tar[name].data
+        
+    def train(self):
+        # randomly sample from memory
+        s,a,r,mask,s_ = self.replay_buffer.sample(BATCH_SIZE)
+        lq1, lq2 = self.update_critic(s,a,r,mask,s_)
+        self.lossQ1 += lq1
+        self.lossQ2 += lq2
+        
+        if (self.cnt_step//(t_episode+1)//2) % DELAY_ACTOR_ITER == 0:
+            self.lossμ += self.update_actor(s)
+        return
+            
+    def sample_transition(self,batch_size):
+        return s, a, r, mask, s_
         
     def store_transition(self,st, at_np, rt, mask, st_):
-        index = self.cnt_epi % MEMORY_CAPACITY
-        t_step = self.cnt_step % t_episode
-        self.memory[index,t_step,:N_STATES] = st.detach()
-        self.memory[index,t_step,N_STATES:N_STATES+N_ACTIONS] = torch.tensor(at_np)
-        self.memory[index,t_step,-N_STATES-2] = torch.tensor(rt)
-        
-        self.memory[index,t_step,-N_STATES-1] = mask
-        self.memory[index,t_step,-N_STATES:] = st_.detach()
+        self.replay_buffer.store(st, at_np, rt, mask, st_)
+        return 
         
     def get_action(self, st):
+        st = st.unsqueeze(0)
         # cast to numpy
         if np.random.uniform() < RAND_EPSILON or self.cnt_step < start_timesteps:
             at_np = self.env.action.space.sample()
@@ -311,7 +368,7 @@ if __name__=="__main__":
     manipulator = world.load_robot('wam')
     end_effector = manipulator.get_end_effector_ids()[-1]
     other_links = manipulator.get_end_effector_ids()[:-1] + manipulator.get_link_ids()
-    states = LinkWorldPositionState(manipulator, link_ids=end_effector) + LinkWorldVelocityState(manipulator, link_ids=end_effector) + LinkWorldPositionState(manipulator, link_ids=other_links)  + LinkWorldVelocityState(manipulator, link_ids=other_links) +  PositionState(box,world)
+    states = LinkWorldVelocityState(manipulator, link_ids=end_effector) + LinkWorldPositionState(manipulator, link_ids=other_links)  + LinkWorldVelocityState(manipulator, link_ids=other_links) + LinkWorldPositionState(manipulator, link_ids=end_effector) + PositionState(box,world)
     STATES_SHAPE = [i.shape[0] for i in states()]
     print(STATES_SHAPE)
     N_STATES = sum(STATES_SHAPE)
