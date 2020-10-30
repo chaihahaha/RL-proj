@@ -116,7 +116,7 @@ class TD3(Policy):
         self.Q2.to(self.device)
         self.cnt_step = 0
 
-    def learn(self, done):
+    def learn(self):
         self.lossμ, self.lossQ1, self.lossQ2 = 0,0,0
         
         # get state $s_t$
@@ -156,7 +156,7 @@ class TD3(Policy):
         self.Q2.load_state_dict(state_dicts['Q2'])
 
 if __name__=="__main__":
-    sim = prl.simulators.Bullet(render=False)
+    sim = prl.simulators.Bullet(render=True)
     world = prl.worlds.BasicWorld(sim)
     box = world.load_box(position=(0.5,0,0.2),dimensions=(0.1,0.1,0.1),mass=0.1,color=[0,0,1,1])
     manipulator = world.load_robot('wam')
@@ -180,7 +180,6 @@ if __name__=="__main__":
     save_freq = 200
     
     n_cycles = 50
-    n_success = 0
     s_reward = 0
     sum_lossμ = 0
     sum_lossQ1 = 0
@@ -193,8 +192,7 @@ if __name__=="__main__":
         
         # run an episode
         for t in range(t_episode):
-            reward = td3.learn(done)
+            reward = td3.learn()
             s_reward += reward
-        n_success += 1 if success(reward) else 0
         #print("SUCCESS" if done else "FAIL",flush=True)
         
