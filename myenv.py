@@ -150,6 +150,8 @@ class μNet(nn.Module):
         self.fc5.weight.data.normal_(0, 1e-5)   # initialization
         self.out = nn.Linear(300, N_ACTIONS)
         self.out.weight.data.normal_(0, 1e-5)   # initialization
+        self.fcn = nn.Linear(N_ACTIONS, N_ACTIONS)
+        self.fcn.weight.data.normal_(0, 1e-5)   # initialization
         self.norm = nn.LayerNorm(200, elementwise_affine=False)
         self.tanh = nn.Tanh()
         self.act = nn.ReLU()
@@ -162,8 +164,10 @@ class μNet(nn.Module):
         #x = self.act(self.fc4(x))
         #x = self.act(self.fc5(x))
         x = self.out(x)
-        x = self.tanh(x) * self.max_action
-        return x
+        x = self.tanh(x)
+        out = x + self.fcn(torch.randn_like(x, requires_grad=False))
+        out *= self.max_action
+        return out
         
 class QNet(nn.Module):
     def __init__(self, max_action):
@@ -294,8 +298,7 @@ class TD3(Policy):
             # compute action with actor μ
             with torch.no_grad():
                 at = self.μ(st)
-            noise = (torch.randn_like(at)*NOISE_EPSILON).clamp(-NOISE_CLIP,NOISE_CLIP)
-            at = (at + noise).clamp(-self.max_action, self.max_action)
+            at = at.clamp(-self.max_action, self.max_action)
             at_np = at.detach().cpu().numpy()[0]
         return at_np
         
@@ -313,8 +316,7 @@ class TD3(Policy):
     def update_critic(self,si,ai,ri,mask,si_):
         with torch.no_grad():
             ai_ = self.μ_tar(si_)
-            noise = (torch.randn_like(ai_)*NOISE_EPSILON).clamp(-NOISE_CLIP,NOISE_CLIP)
-            ai_ = (ai_ + noise).clamp(-self.max_action, self.max_action)
+            ai_ = ai_.clamp(-self.max_action, self.max_action)
         
             Q1_ = self.Q1_tar(si_,ai_)
             Q2_ = self.Q2_tar(si_,ai_)
