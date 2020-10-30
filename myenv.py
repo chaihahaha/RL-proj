@@ -414,7 +414,7 @@ if __name__=="__main__":
             s_reward = 0
             tik = time.time()
         if i%save_freq==0:
-            print("Saving model...")
+#            print("Saving model...")
             td3.save("td3.ckpt")
 #    for i in count():
 #        obs,reward,done,info = env.step()

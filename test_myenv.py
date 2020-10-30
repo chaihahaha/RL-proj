@@ -151,7 +151,7 @@ class TD3(Policy):
     
     def load(self, filename):
         state_dicts = torch.load(filename)
-        self.μ.load_state_dict(state_dicts['μ'])
+        self.μ.load_state_dict(state_dicts['μ'], strict=False)
         self.Q1.load_state_dict(state_dicts['Q1'])
         self.Q2.load_state_dict(state_dicts['Q2'])
 
@@ -193,6 +193,7 @@ if __name__=="__main__":
         # run an episode
         for t in range(t_episode):
             reward = td3.learn()
+            time.sleep(0.05)
             s_reward += reward
         #print("SUCCESS" if done else "FAIL",flush=True)
         
