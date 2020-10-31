@@ -110,20 +110,6 @@ class TD3(object):
 
         return st_dic, rt, done, info
         
-    def update_actor(self, si):
-        ai = self.μ(si)
-        Q1 = self.Q1(si, ai)
-        lossμ = -torch.mean(Q1) + ACTION_L2 * torch.mean(ai**2)
-        self.optimμ.zero_grad()
-        self.optimQ1.zero_grad()
-        self.optimQ2.zero_grad()
-        lossμ.backward()
-        self.optimμ.step()
-        self.optimμ.zero_grad()
-        self.optimQ1.zero_grad()
-        self.optimQ2.zero_grad()
-        return lossμ.item()
-    
     def load(self, filename):
         state_dicts = torch.load(filename)
         self.μ.load_state_dict(state_dicts['μ'])
@@ -162,14 +148,3 @@ if __name__=="__main__":
                 break
         n_success += 1 if info['is_success'] else 0
         #print("SUCCESS" if done else "FAIL",flush=True)
-        
-        # collect statistics of #n_samples results
-        if i%n_samples==0:
-            tok = time.time()
-            print("Epoch {}\tSuc rate: {:.2f}\tAvg reward: {:.2f}\tTime: {:.1f}".format(int(i/n_samples),n_success/n_samples,s_reward/n_samples, tok-tik),flush=True)
-            n_success = 0
-            s_reward = 0
-            tik = time.time()
-#    for i in count():
-#        obs,reward,done,info = env.step()
-#        print(reward)
