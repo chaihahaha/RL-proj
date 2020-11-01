@@ -17,7 +17,7 @@ BUFFER_SIZE = int(5e3)
 NOISE_EPSILON = 1
 NOISE_CLIP = 0.5
 RAND_EPSILON = 0.3
-ACTION_L2 = 1.0
+ACTION_L2 = 0.0
 LR = 3e-4
 BATCH_SIZE = 8
 N_BATCHES = 1
@@ -29,7 +29,7 @@ t_episode = 100
 start_timesteps = 25e3
 REPLAY_K = 4
 LSH_K = 20
-β = 1
+β = 1e-3
 
 def picked_and_lifted_reward(box_pos):
     assert len(box_pos) == 3
@@ -53,8 +53,8 @@ def approach_box_reward(end_effector_pos, box_pos):
     value = -(dx**2+dy**2+dz**2)**0.5
     return value
 
-def intrinsic_counting_reward(state):
-    freq = hashtable.freq(state)
+def intrinsic_counting_reward(state, action):
+    freq = hashtable.freq(state, action)
     return β * (freq + 0.01)**(-0.5)
         
 class ReplayBuffer(object):
@@ -139,7 +139,7 @@ class ReplayBuffer(object):
         s = torch.cat([sobs, sag, sdg], 1)
         s_ = torch.cat([s_obs, s_ag, s_dg], 1)
         for i in range(len(r)):
-            r[i] = self.meta_reward(s_[i])
+            r[i] = self.meta_reward(s_[i], a[i])
             if not self.meta:
                 r[i] += self.reward(s_ag[i], s_dg[i])
         
@@ -150,24 +150,27 @@ class HashTable(object):
         self.A = np.random.randn(k, dim)
         self.dic = dict()
 
-    def add(self, s):
-        code = self.getcode(s)
+    def add(self, s, a):
+        code = self.getcode(s, a)
         if code not in self.dic.keys():
             self.dic[code] = 1
         else:
             self.dic[code] += 1
 
-    def freq(self, s):
-        code = self.getcode(s)
+    def freq(self, s, a):
+        code = self.getcode(s, a)
         if code not in self.dic.keys():
             return 0
         else:
             return self.dic[code]
 
-    def getcode(self, s):
+    def getcode(self, s, a):
         if type(s) == torch.Tensor and (not s.device==torch.device(type='cpu')):
             s = s.cpu()
-        code = tuple(np.sign(self.A @ np.array(s).reshape(-1,1)).flatten())
+        if type(a) == torch.Tensor and (not a.device==torch.device(type='cpu')):
+            a = a.cpu()
+        arr = np.concatenate([np.array(s).reshape(-1),np.array(a).reshape(-1)]).reshape(-1,1)
+        code = tuple(np.sign(self.A @ arr).flatten())
         return code
         
 class μNet(nn.Module):
@@ -187,7 +190,7 @@ class μNet(nn.Module):
         self.out = nn.Linear(300, N_ACTIONS)
         self.out.weight.data.normal_(0, 1e-5)   # initialization
         self.fcn = nn.Linear(N_ACTIONS, N_ACTIONS)
-        self.fcn.weight.data.normal_(0, 1e-5)   # initialization
+        self.fcn.weight.data.normal_(0, 1e-2)   # initialization
         self.norm = nn.LayerNorm(200, elementwise_affine=False)
         self.tanh = nn.Tanh()
         self.act = nn.ReLU()
@@ -288,8 +291,8 @@ class TD3(Policy):
         st_, _, _, info = self.env.step()
 
         # add to hash table and compute intrinsic reward
-        hashtable.add(st_)
-        rt_in = self.meta_reward(st_)
+        hashtable.add(st_, at_np)
+        rt_in = self.meta_reward(st_, at_np)
 
         # take last but one state as achieved goal, take last state as desired goal
         rt_env = self.reward(self.states()[-2],self.states()[-1])
@@ -425,7 +428,7 @@ if __name__=="__main__":
     
     env.reset()
     
-    hashtable = HashTable(LSH_K, N_STATES)
+    hashtable = HashTable(LSH_K, N_STATES+N_ACTIONS)
     td3 = TD3(env, states, action,manipulator,touched_reward, intrinsic_counting_reward, "cuda")
     
 #    print("Loading model...")
