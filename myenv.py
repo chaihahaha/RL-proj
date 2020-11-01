@@ -22,13 +22,13 @@ LR = 3e-4
 BATCH_SIZE = 8
 N_BATCHES = 1
 TARGET_REPLACE_ITER = 1
-DELAY_ACTOR_STEPS = 2
+DELAY_ACTOR_STEPS = 20
 polyak = 0.005
 t_episode = 100
 γ = 1-1/t_episode
 start_timesteps = 25e3
 REPLAY_K = 4
-LSH_K = 1024
+LSH_K = 20
 β = 1
 
 def picked_and_lifted_reward(box_pos):
@@ -52,32 +52,40 @@ def approach_box_reward(end_effector_pos, box_pos):
     dx,dy,dz = x1-x2,y1-y2,z1-z2
     value = -(dx**2+dy**2+dz**2)**0.5
     return value
+
+def intrinsic_counting_reward(state):
+    freq = hashtable.freq(state)
+    return β * (freq + 0.01)**(-0.5)
         
 class ReplayBuffer(object):
-    def __init__(self, obs_dim, ag_dim, dg_dim, a_dim, r_dim, mask_dim, t_episode, replay_k, reward, device):
+    def __init__(self, size, obs_dim, ag_dim, dg_dim, a_dim, r_dim, mask_dim, t_episode, replay_k, reward,meta_reward, meta,device):
         self.device = device
         self.reward = reward
+        self.size = size
         self.obs_dim, self.ag_dim, self.dg_dim, self.a_dim, self.r_dim, self.mask_dim = obs_dim, ag_dim, dg_dim, a_dim, r_dim, mask_dim
         self.t_episode = t_episode
-        self.sobs = torch.zeros((BUFFER_SIZE,t_episode, obs_dim), device=device)
-        self.sag = torch.zeros((BUFFER_SIZE,t_episode, ag_dim), device=device)
-        self.sdg = torch.zeros((BUFFER_SIZE,t_episode, dg_dim), device=device)
+        self.sobs = torch.zeros((size,t_episode, obs_dim), device=device)
+        self.sag = torch.zeros((size,t_episode, ag_dim), device=device)
+        self.sdg = torch.zeros((size,t_episode, dg_dim), device=device)
         
-        self.s_obs = torch.zeros((BUFFER_SIZE,t_episode, obs_dim), device=device)
-        self.s_ag = torch.zeros((BUFFER_SIZE,t_episode, ag_dim), device=device)
-        self.s_dg = torch.zeros((BUFFER_SIZE,t_episode, dg_dim), device=device)
+        self.s_obs = torch.zeros((size,t_episode, obs_dim), device=device)
+        self.s_ag = torch.zeros((size,t_episode, ag_dim), device=device)
+        self.s_dg = torch.zeros((size,t_episode, dg_dim), device=device)
         
-        self.a = torch.zeros((BUFFER_SIZE,t_episode, a_dim), device=device)
+        self.a = torch.zeros((size,t_episode, a_dim), device=device)
         
-        self.r = torch.zeros((BUFFER_SIZE,t_episode, r_dim), device=device)
+        self.r = torch.zeros((size,t_episode, r_dim), device=device)
         
-        self.mask = torch.zeros((BUFFER_SIZE,t_episode, mask_dim), device=device)
+        self.mask = torch.zeros((size,t_episode, mask_dim), device=device)
         self.future_p = 1 - (1. / (1 + replay_k))
         self.cnt = 0
+
+        self.meta = meta
+        self.meta_reward = meta_reward
         
     def store(self, s, a, r, mask, s_):
         s, s_ = s.detach(), s_.detach()
-        index = (self.cnt // t_episode) % BUFFER_SIZE
+        index = (self.cnt // t_episode) % self.size
         t_step = self.cnt % t_episode
         self.sobs[index,t_step] = s[:self.obs_dim]
         self.sag[index,t_step] = s[self.obs_dim:-self.dg_dim]
@@ -97,7 +105,7 @@ class ReplayBuffer(object):
     def sample(self, batch_size):
 
         # Select which episodes and time steps to use.
-        right = min(self.cnt//self.t_episode - 1, BUFFER_SIZE)
+        right = min(self.cnt//self.t_episode - 1, self.size)
         episode_idxs = np.random.randint(0, right, batch_size)
         t_samples = np.random.randint(self.t_episode, size=batch_size)
         
@@ -128,11 +136,13 @@ class ReplayBuffer(object):
         sdg[her_indexes] = future_ag
         s_dg[her_indexes] = future_ag
         
-        for i in range(len(r)):
-            r[i] = self.reward(sag[i], sdg[i])
-        
         s = torch.cat([sobs, sag, sdg], 1)
         s_ = torch.cat([s_obs, s_ag, s_dg], 1)
+        for i in range(len(r)):
+            r[i] = self.meta_reward(s_[i])
+            if not self.meta:
+                r[i] += self.reward(s_ag[i], s_dg[i])
+        
         return s, a, r, mask, s_
         
 class HashTable(object):
@@ -155,6 +165,8 @@ class HashTable(object):
             return self.dic[code]
 
     def getcode(self, s):
+        if type(s) == torch.Tensor and (not s.device==torch.device(type='cpu')):
+            s = s.cpu()
         code = tuple(np.sign(self.A @ np.array(s).reshape(-1,1)).flatten())
         return code
         
@@ -224,10 +236,11 @@ class QNet(nn.Module):
         return out
 
 class TD3(Policy):
-    def __init__(self, env, states, actions, robot, reward, device):
+    def __init__(self, env, states, actions, robot, reward, meta_reward, device):
         super(TD3, self).__init__(states, actions)
         self.robot = robot
         self.reward = reward
+        self.meta_reward = meta_reward
         self.env = env
         self.states = states
         self.actions = actions
@@ -253,10 +266,10 @@ class TD3(Policy):
         self.μ_tar.load_state_dict(self.μ.state_dict())
         self.Q1_tar.load_state_dict(self.Q1.state_dict())
         self.Q2_tar.load_state_dict(self.Q2.state_dict())
-        self.replay_buffer = ReplayBuffer(N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, device)
+        self.replay_buffer = ReplayBuffer(BUFFER_SIZE,N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, meta_reward, False, device)
+        self.meta_replay_buffer = ReplayBuffer(int(start_timesteps/t_episode)+1, N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, meta_reward, True, device)
         self.cnt_step = 0
         self.lossμ, self.lossQ1, self.lossQ2 = 0,0,0
-        self.lsh = HashTable(LSH_K, N_STATES)
 
     def learn(self, done):
         self.lossμ, self.lossQ1, self.lossQ2 = 0,0,0
@@ -275,8 +288,8 @@ class TD3(Policy):
         st_, _, _, info = self.env.step()
 
         # add to hash table and compute intrinsic reward
-        self.lsh.add(st_)
-        rt_in = β * self.lsh.freq(st_)**(-0.5)
+        hashtable.add(st_)
+        rt_in = self.meta_reward(st_)
 
         # take last but one state as achieved goal, take last state as desired goal
         rt_env = self.reward(self.states()[-2],self.states()[-1])
@@ -287,8 +300,11 @@ class TD3(Policy):
         # cast to tensor
         st_ = torch.tensor(st_, dtype=torch.float,device=self.device)
         
-        # keep (st, at, rt, st_) in memory
+        # keep (st, at, rt, st_) in buffer
         self.replay_buffer.store(st, at_np, rt, 0. if done else γ, st_)
+        # keep (st, at, rt_in, st_) in meta training buffer
+        if self.cnt_step < start_timesteps:
+            self.meta_replay_buffer.store(st, at_np, rt_in, 0. if done else γ, st_)
         
         if self.cnt_step > 2*t_episode:
             for _ in range(N_BATCHES):
@@ -310,8 +326,11 @@ class TD3(Policy):
                 d_tar[name].data = polyak*param.data + (1-polyak) * d_tar[name].data
         
     def train(self):
-        # randomly sample from memory
-        s,a,r,mask,s_ = self.replay_buffer.sample(BATCH_SIZE)
+        if self.cnt_step >= start_timesteps:
+            # randomly sample from memory
+            s,a,r,mask,s_ = self.replay_buffer.sample(BATCH_SIZE)
+        else:
+            s,a,r,mask,s_ = self.meta_replay_buffer.sample(BATCH_SIZE)
         lq1, lq2 = self.update_critic(s,a,r,mask,s_)
         self.lossQ1 += lq1
         self.lossQ2 += lq2
@@ -405,7 +424,9 @@ if __name__=="__main__":
     env = Env(world, states,actions=action)
     
     env.reset()
-    td3 = TD3(env, states, action,manipulator,touched_reward, "cuda")
+    
+    hashtable = HashTable(LSH_K, N_STATES)
+    td3 = TD3(env, states, action,manipulator,touched_reward, intrinsic_counting_reward, "cuda")
     
 #    print("Loading model...")
 #    td3.load("td3.ckpt")
