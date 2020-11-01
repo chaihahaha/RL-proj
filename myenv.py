@@ -19,16 +19,18 @@ NOISE_CLIP = 0.5
 RAND_EPSILON = 0.3
 ACTION_L2 = 1.0
 LR = 3e-4
-BATCH_SIZE = 16
+BATCH_SIZE = 8
 N_BATCHES = 1
-TARGET_REPLACE_ITER = 2
-DELAY_ACTOR_ITER = 2
+TARGET_REPLACE_ITER = 1
+DELAY_ACTOR_STEPS = 2
 polyak = 0.005
 t_episode = 100
 γ = 1-1/t_episode
 start_timesteps = 25e3
 REPLAY_K = 4
-        
+LSH_K = 1024
+β = 1
+
 def picked_and_lifted_reward(box_pos):
     assert len(box_pos) == 3
     x,y,z = box_pos
@@ -133,6 +135,28 @@ class ReplayBuffer(object):
         s_ = torch.cat([s_obs, s_ag, s_dg], 1)
         return s, a, r, mask, s_
         
+class HashTable(object):
+    def __init__(self, k, dim):
+        self.A = np.random.randn(k, dim)
+        self.dic = dict()
+
+    def add(self, s):
+        code = self.getcode(s)
+        if code not in self.dic.keys():
+            self.dic[code] = 1
+        else:
+            self.dic[code] += 1
+
+    def freq(self, s):
+        code = self.getcode(s)
+        if code not in self.dic.keys():
+            return 0
+        else:
+            return self.dic[code]
+
+    def getcode(self, s):
+        code = tuple(np.sign(self.A @ np.array(s).reshape(-1,1)).flatten())
+        return code
         
 class μNet(nn.Module):
     def __init__(self, max_action):
@@ -232,6 +256,7 @@ class TD3(Policy):
         self.replay_buffer = ReplayBuffer(N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, device)
         self.cnt_step = 0
         self.lossμ, self.lossQ1, self.lossQ2 = 0,0,0
+        self.lsh = HashTable(LSH_K, N_STATES)
 
     def learn(self, done):
         self.lossμ, self.lossQ1, self.lossQ2 = 0,0,0
@@ -248,8 +273,16 @@ class TD3(Policy):
         
         # step in environment to get next state $s_{t+1}$, reward $r_t$
         st_, _, _, info = self.env.step()
+
+        # add to hash table and compute intrinsic reward
+        self.lsh.add(st_)
+        rt_in = β * self.lsh.freq(st_)**(-0.5)
+
         # take last but one state as achieved goal, take last state as desired goal
-        rt = self.reward(self.states()[-2],self.states()[-1])
+        rt_env = self.reward(self.states()[-2],self.states()[-1])
+
+        # total reward is sum of env reward and intrinsic reward
+        rt = rt_env + rt_in
 
         # cast to tensor
         st_ = torch.tensor(st_, dtype=torch.float,device=self.device)
@@ -257,16 +290,15 @@ class TD3(Policy):
         # keep (st, at, rt, st_) in memory
         self.replay_buffer.store(st, at_np, rt, 0. if done else γ, st_)
         
-        if self.cnt_step>start_timesteps:
+        if self.cnt_step > 2*t_episode:
             for _ in range(N_BATCHES):
                 self.train()
             
-            if (self.cnt_step//t_episode) % TARGET_REPLACE_ITER == 0:
+            if ((self.cnt_step//t_episode) % TARGET_REPLACE_ITER == 0) and (self.cnt_step % t_episode == 0):
                 self.update_target()
             
-            
         self.cnt_step += 1
-        return rt, self.lossμ*DELAY_ACTOR_ITER/N_BATCHES, self.lossQ1/N_BATCHES, self.lossQ2/N_BATCHES
+        return rt_env, self.lossμ*DELAY_ACTOR_STEPS/N_BATCHES, self.lossQ1/N_BATCHES, self.lossQ2/N_BATCHES
         
     def update_target(self):
         update_pairs = [(self.μ, self.μ_tar), (self.Q1, self.Q1_tar), (self.Q2, self.Q2_tar)]
@@ -284,7 +316,7 @@ class TD3(Policy):
         self.lossQ1 += lq1
         self.lossQ2 += lq2
         
-        if (self.cnt_step//t_episode) % DELAY_ACTOR_ITER == 0:
+        if self.cnt_step % DELAY_ACTOR_STEPS == 0:
             self.lossμ += self.update_actor(s)
         return
             
