@@ -314,7 +314,7 @@ class TD3(Policy):
                 self.update_target()
             
         self.cnt_step += 1
-        return rt_env, self.lossμ*DELAY_ACTOR_STEPS/N_BATCHES, self.lossQ1/N_BATCHES, self.lossQ2/N_BATCHES
+        return rt_env, rt_in, self.lossμ*DELAY_ACTOR_STEPS/N_BATCHES, self.lossQ1/N_BATCHES, self.lossQ2/N_BATCHES
         
     def update_target(self):
         update_pairs = [(self.μ, self.μ_tar), (self.Q1, self.Q1_tar), (self.Q2, self.Q2_tar)]
@@ -343,7 +343,7 @@ class TD3(Policy):
     def get_action(self, st):
         st = st.unsqueeze(0)
         # cast to numpy
-        if np.random.uniform() < RAND_EPSILON or self.cnt_step < start_timesteps:
+        if np.random.uniform() < RAND_EPSILON:
             at_np = self.env.action.space.sample()
         else:
             # compute action with actor μ
@@ -436,6 +436,7 @@ if __name__=="__main__":
     n_cycles = 50
     n_success = 0
     s_reward = 0
+    s_reward_in = 0
     sum_lossμ = 0
     sum_lossQ1 = 0
     sum_lossQ2 = 0
@@ -448,23 +449,25 @@ if __name__=="__main__":
         # run an episode
         for t in range(t_episode):
             done = (t >= t_episode - 1)
-            reward, lossμ, lossQ1, lossQ2 = td3.learn(done)
+            reward, reward_in, lossμ, lossQ1, lossQ2 = td3.learn(done)
             sum_lossμ += lossμ
             sum_lossQ1 += lossQ1
             sum_lossQ2 += lossQ2
             s_reward += reward
+            s_reward_in += reward_in
         n_success += 1 if success(reward) else 0
         #print("SUCCESS" if done else "FAIL",flush=True)
         
         # collect statistics of #n_cycles results
         if i%n_cycles==0:
             tok = time.time()
-            print("Epoch {}\tSuc rate: {:.2f}\tAvg reward: {:.2f}\tLossμ:{:.3f}\tLossQ1:{:.3f}\tLossQ2:{:.3f}\tTime: {:.1f}".format(int(i/n_cycles),n_success/n_cycles,s_reward/n_cycles,sum_lossμ/n_cycles, sum_lossQ1/n_cycles, sum_lossQ2/n_cycles, tok-tik),flush=True)
+            print("Epoch {}\tSuc rate: {:.2f}\tAvg reward: {:.2f}\tAvg intrinsic reward: {:.2f}\tLossμ:{:.3f}\tLossQ1:{:.3f}\tLossQ2:{:.3f}\tTime: {:.1f}".format(int(i/n_cycles),n_success/n_cycles,s_reward/n_cycles,s_reward_in/n_cycles,sum_lossμ/n_cycles, sum_lossQ1/n_cycles, sum_lossQ2/n_cycles, tok-tik),flush=True)
             sum_lossμ = 0
             sum_lossQ1 = 0
             sum_lossQ2 = 0
             n_success = 0
             s_reward = 0
+            s_reward_in = 0
             tik = time.time()
         if i%save_freq==0:
 #            print("Saving model...")
