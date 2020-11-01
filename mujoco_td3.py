@@ -273,7 +273,7 @@ if __name__=="__main__":
     sum_lossQ1 = 0
     sum_lossQ2 = 0
     tik = time.time()
-    for i in range(1,num_episodes+1):
+    for i in count(start=1):
         s = env.reset()
         # run an episode
         done = False

@@ -444,7 +444,7 @@ if __name__=="__main__":
     sum_lossQ1 = 0
     sum_lossQ2 = 0
     tik = time.time()
-    for i in range(1,num_episodes+1):
+    for i in count(start=1):
         # randomly reset robot joint and box position
         manipulator.reset_joint_states(np.random.uniform(-1,1,(15)))
         world.move_object(box,[np.random.uniform(-1,1),np.random.uniform(-1,1),0.2])
