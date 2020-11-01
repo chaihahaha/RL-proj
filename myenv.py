@@ -464,7 +464,7 @@ if __name__=="__main__":
         # collect statistics of #n_cycles results
         if i%n_cycles==0:
             tok = time.time()
-            print("Epoch {}\tSuc rate: {:.2f}\tAvg reward: {:.2f}\tAvg intrinsic reward: {:.2f}\tLossμ:{:.3f}\tLossQ1:{:.3f}\tLossQ2:{:.3f}\tTime: {:.1f}".format(int(i/n_cycles),n_success/n_cycles,s_reward/n_cycles,s_reward_in/n_cycles,sum_lossμ/n_cycles, sum_lossQ1/n_cycles, sum_lossQ2/n_cycles, tok-tik),flush=True)
+            print("Epoch {:5d}\tSuc rate: {:.2f}\tAvg reward: {:.2f}\tAvg intrinsic reward: {:.2f}\tLossμ:{:.3f}\tLossQ1:{:.3f}\tLossQ2:{:.3f}\tTime: {:.1f}".format(int(i/n_cycles),n_success/n_cycles,s_reward/n_cycles,s_reward_in/n_cycles,sum_lossμ/n_cycles, sum_lossQ1/n_cycles, sum_lossQ2/n_cycles, tok-tik),flush=True)
             sum_lossμ = 0
             sum_lossQ1 = 0
             sum_lossQ2 = 0

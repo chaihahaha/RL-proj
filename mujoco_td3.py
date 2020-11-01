@@ -292,7 +292,7 @@ if __name__=="__main__":
         # collect statistics of #n_samples results
         if i%n_samples==0:
             tok = time.time()
-            print("Epoch {}\tSuc rate: {:.2f}\tAvg reward: {:.2f}\tLossμ:{:.3f}\tLossQ1:{:.3f}\tLossQ2:{:.3f}\tTime: {:.1f}".format(int(i/n_samples),n_success/n_samples,s_reward/n_samples,sum_lossμ/n_samples/policy_freq, sum_lossQ1/n_samples, sum_lossQ2/n_samples, tok-tik),flush=True)
+            print("Epoch {:5d}\tSuc rate: {:.2f}\tAvg reward: {:.2f}\tLossμ:{:.3f}\tLossQ1:{:.3f}\tLossQ2:{:.3f}\tTime: {:.1f}".format(int(i/n_samples),n_success/n_samples,s_reward/n_samples,sum_lossμ/n_samples/policy_freq, sum_lossQ1/n_samples, sum_lossQ2/n_samples, tok-tik),flush=True)
             sum_lossμ = 0
             sum_lossQ1 = 0
             sum_lossQ2 = 0
