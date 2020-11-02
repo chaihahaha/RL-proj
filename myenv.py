@@ -30,6 +30,7 @@ start_timesteps = 25e3
 REPLAY_K = 4
 LSH_K = 20
 β = 1e-3
+p_ratio = 1e-4
 
 def picked_and_lifted_reward(box_pos):
     assert len(box_pos) == 3
@@ -173,9 +174,44 @@ class HashTable(object):
         code = tuple(np.sign(self.A @ arr).flatten())
         return code
         
+class Normalizer(object):
+    def __init__(self, dim, cliprange, device):
+        self.sum = torch.zeros(dim,requires_grad=False, device=device)
+        self.sumsq = torch.zeros(dim,requires_grad=False, device=device)
+        self.dim = dim
+        self.cnt = 0
+        self.eps = torch.tensor(1e-3, device=device)
+        self.cliprange = cliprange
+
+    def update(self, x):
+        self.sum += x.sum(dim=0)
+        self.sumsq += (x**2).sum(dim=0)
+        self.cnt += x.shape[0]
+
+    def view(self, mean):
+        return mean.view((1, self.dim))
+
+    def get_mean_std(self):
+        mean = self.view(self.sum/self.cnt)
+        var = self.sumsq/self.cnt - (self.sum/self.cnt)**2
+        var = torch.max(self.eps, var)
+        std = self.view((var)**0.5)
+        return mean, std
+
+    def normalize(self, x):
+        mean, std = self.get_mean_std()
+        x = ((x-mean)/std).clamp(-self.cliprange, self.cliprange)
+        return x
+
+    def denormalize(self, x):
+        mean, std = self.get_mean_std()
+        x = (x*std + mean).clamp(-self.cliprange, self.cliprange)
+        return x
+
 class μNet(nn.Module):
-    def __init__(self, max_action):
+    def __init__(self, max_action, norm):
         super(μNet, self).__init__()
+        self.norm = norm
         self.max_action = max_action
         self.fc1 = nn.Linear(N_STATES, 300)
         self.fc1.weight.data.normal_(0, 1e-5)   # initialization
@@ -191,12 +227,13 @@ class μNet(nn.Module):
         self.out.weight.data.normal_(0, 1e-5)   # initialization
         self.fcn = nn.Linear(N_ACTIONS, N_ACTIONS)
         self.fcn.weight.data.normal_(0, 1e-2)   # initialization
-        self.norm = nn.LayerNorm(200, elementwise_affine=False)
         self.tanh = nn.Tanh()
         self.act = nn.ReLU()
         
 
     def forward(self, x):
+        self.norm.update(x)
+        x = self.norm.normalize(x)
         x = self.act(self.fc1(x))
         x = self.act(self.fc2(x))
         x = self.act(self.fc3(x))
@@ -209,9 +246,9 @@ class μNet(nn.Module):
         return out
         
 class QNet(nn.Module):
-    def __init__(self, max_action):
+    def __init__(self, norm):
         super(QNet, self).__init__()
-        self.max_action = max_action
+        self.norm = norm
         self.fc1 = nn.Linear(N_STATES + N_ACTIONS, 300)
         self.fc1.weight.data.normal_(0, 1e-5)   # initialization
         self.fc2 = nn.Linear(300, 300)
@@ -224,18 +261,52 @@ class QNet(nn.Module):
         self.fc5.weight.data.normal_(0, 1e-5)   # initialization
         self.out = nn.Linear(300, 1)
         self.out.weight.data.normal_(0, 1e-5)   # initialization
-        self.norm = nn.LayerNorm(300, elementwise_affine=False)
         self.tanh = nn.Tanh()
         self.act = nn.ReLU()
 
     def forward(self, x1, x2):
-        x = torch.cat([x1,x2/self.max_action],dim=1)
+        self.norm.update(x1)
+        x1 = self.norm.normalize(x1)
+        x = torch.cat([x1,x2],dim=1)
         x = self.act(self.fc1(x))
         x = self.act(self.fc2(x))
         x = self.act(self.fc3(x))
         #x = self.act(self.fc4(x))
         #x = self.act(self.fc5(x))
         out = self.tanh(self.out(x))/(1-γ)
+        return out
+
+class PNet(nn.Module):
+    def __init__(self, norm):
+        super(PNet, self).__init__()
+        self.norm = norm
+        self.fc1 = nn.Linear(N_STATES+N_ACTIONS, 300)
+        self.fc1.weight.data.normal_(0, 1e-5)   # initialization
+        self.fc2 = nn.Linear(300, 300)
+        self.fc2.weight.data.normal_(0, 1e-5)   # initialization
+        self.fc3 = nn.Linear(300, 300)
+        self.fc3.weight.data.normal_(0, 1e-5)   # initialization
+        self.fc4 = nn.Linear(300, 300)
+        self.fc4.weight.data.normal_(0, 1e-5)   # initialization
+        self.fc5 = nn.Linear(300, 300)
+        self.fc5.weight.data.normal_(0, 1e-5)   # initialization
+        self.out = nn.Linear(300, N_STATES)
+        self.out.weight.data.normal_(0, 1e-5)   # initialization
+        self.tanh = nn.Tanh()
+        self.act = nn.ReLU()
+        
+
+    def forward(self, x1, x2):
+        self.norm.update(x1)
+        x1 = self.norm.normalize(x1)
+        x = torch.cat([x1,x2],dim=1)
+        x = self.act(self.fc1(x))
+        x = self.act(self.fc2(x))
+        x = self.act(self.fc3(x))
+        #x = self.act(self.fc4(x))
+        #x = self.act(self.fc5(x))
+        x = self.out(x)
+        out = self.norm.denormalize(x)
         return out
 
 class TD3(Policy):
@@ -250,19 +321,24 @@ class TD3(Policy):
         self.action_data = None
         self.device = device
         self.max_action = np.max(np.abs(actions.bounds()))
-        self.μ = μNet(self.max_action)
+        self.norm = Normalizer(N_STATES,1e3, device)
+        self.μ = μNet(self.max_action, self.norm)
         self.μ.to(device)
-        self.Q1, self.Q2 = QNet(self.max_action), QNet(self.max_action)
+        self.Q1, self.Q2 = QNet(self.norm), QNet(self.norm)
         self.Q1.to(self.device)
         self.Q2.to(self.device)
+        self.P = PNet(self.norm)
+        self.P.to(device)
         trainableμ = list(filter(lambda p: p.requires_grad, self.μ.parameters()))
         self.optimμ = torch.optim.Adam(trainableμ, lr=LR)
         trainableQ1 = list(filter(lambda p: p.requires_grad, self.Q1.parameters()))
         self.optimQ1 = torch.optim.Adam(trainableQ1, lr=LR)
         trainableQ2 = list(filter(lambda p: p.requires_grad, self.Q2.parameters()))
         self.optimQ2 = torch.optim.Adam(trainableQ2, lr=LR)
-        self.μ_tar = μNet(self.max_action)
-        self.Q1_tar, self.Q2_tar = QNet(self.max_action), QNet(self.max_action)
+        trainableP = list(filter(lambda p: p.requires_grad, self.P.parameters()))
+        self.optimP = torch.optim.Adam(trainableP, lr=LR)
+        self.μ_tar = μNet(self.max_action, self.norm)
+        self.Q1_tar, self.Q2_tar = QNet(self.norm), QNet(self.norm)
         self.μ_tar.to(device)
         self.Q1_tar.to(self.device)
         self.Q2_tar.to(self.device)
@@ -290,9 +366,12 @@ class TD3(Policy):
         # step in environment to get next state $s_{t+1}$, reward $r_t$
         st_, _, _, info = self.env.step()
 
+        rt_p = p_ratio * self.update_physical_predictor(st, at_np, st_)
         # add to hash table and compute intrinsic reward
         hashtable.add(st_, at_np)
-        rt_in = self.meta_reward(st_, at_np)
+        rt_lsh = self.meta_reward(st_, at_np)
+
+        rt_in = rt_p + rt_lsh
 
         # take last but one state as achieved goal, take last state as desired goal
         rt_env = self.reward(self.states()[-2],self.states()[-1])
@@ -356,6 +435,17 @@ class TD3(Policy):
             at_np = at.detach().cpu().numpy()[0]
         return at_np
         
+    def update_physical_predictor(self, s, a, s_):
+        s = s.unsqueeze(0).to(self.device)
+        a = torch.tensor(a, device=self.device).unsqueeze(0)
+        s_ = torch.tensor(s_, device=self.device).unsqueeze(0)
+        s_p = self.P(s, a)
+        lossP = torch.mean((s_p-s_)**2)
+        lossP.backward()
+        self.optimP.step()
+        self.optimP.zero_grad()
+        return lossP
+
     def update_actor(self, si):
         ai = self.μ(si)
         Q1 = self.Q1(si, ai)
