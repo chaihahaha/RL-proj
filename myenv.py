@@ -56,7 +56,7 @@ def approach_box_reward(end_effector_pos, box_pos):
 
 def intrinsic_counting_reward(state, action):
     freq = hashtable.freq(state, action)
-    return β * (freq + 0.01)**(-0.5)
+    return (freq + 0.01)**(-0.5)
         
 class ReplayBuffer(object):
     def __init__(self, size, obs_dim, ag_dim, dg_dim, a_dim, r_dim, mask_dim, t_episode, replay_k, reward,meta_reward, meta,device):
@@ -366,12 +366,12 @@ class TD3(Policy):
         # step in environment to get next state $s_{t+1}$, reward $r_t$
         st_, _, _, info = self.env.step()
 
-        rt_p = p_ratio * self.update_physical_predictor(st, at_np, st_)
+        rt_p = self.update_physical_predictor(st, at_np, st_)
         # add to hash table and compute intrinsic reward
         hashtable.add(st_, at_np)
         rt_lsh = self.meta_reward(st_, at_np)
 
-        rt_in = rt_p + rt_lsh
+        rt_in = p_ratio * rt_p + β * rt_lsh
 
         # take last but one state as achieved goal, take last state as desired goal
         rt_env = self.reward(self.states()[-2],self.states()[-1])
@@ -396,7 +396,7 @@ class TD3(Policy):
                 self.update_target()
             
         self.cnt_step += 1
-        return rt_env, rt_in, self.lossμ*DELAY_ACTOR_STEPS/N_BATCHES, self.lossQ1/N_BATCHES, self.lossQ2/N_BATCHES
+        return rt_env, rt_p, rt_lsh, self.lossμ*DELAY_ACTOR_STEPS/N_BATCHES, self.lossQ1/N_BATCHES, self.lossQ2/N_BATCHES
         
     def update_target(self):
         update_pairs = [(self.μ, self.μ_tar), (self.Q1, self.Q1_tar), (self.Q2, self.Q2_tar)]
@@ -529,7 +529,8 @@ if __name__=="__main__":
     n_cycles = 50
     n_success = 0
     s_reward = 0
-    s_reward_in = 0
+    s_reward_lsh = 0
+    s_reward_p = 0
     sum_lossμ = 0
     sum_lossQ1 = 0
     sum_lossQ2 = 0
@@ -542,25 +543,27 @@ if __name__=="__main__":
         # run an episode
         for t in range(t_episode):
             done = (t >= t_episode - 1)
-            reward, reward_in, lossμ, lossQ1, lossQ2 = td3.learn(done)
+            reward, reward_lsh, reward_p, lossμ, lossQ1, lossQ2 = td3.learn(done)
             sum_lossμ += lossμ
             sum_lossQ1 += lossQ1
             sum_lossQ2 += lossQ2
             s_reward += reward
-            s_reward_in += reward_in
+            s_reward_lsh += reward_lsh
+            s_reward_p += reward_p
         n_success += 1 if success(reward) else 0
         #print("SUCCESS" if done else "FAIL",flush=True)
         
         # collect statistics of #n_cycles results
         if i%n_cycles==0:
             tok = time.time()
-            print("Epoch {:5d}\tSuc rate: {:.2f}\tAvg reward: {:.2f}\tAvg intrinsic reward: {:.2f}\tLossμ:{:.3f}\tLossQ1:{:.3f}\tLossQ2:{:.3f}\tTime: {:.1f}".format(int(i/n_cycles),n_success/n_cycles,s_reward/n_cycles,s_reward_in/n_cycles,sum_lossμ/n_cycles, sum_lossQ1/n_cycles, sum_lossQ2/n_cycles, tok-tik),flush=True)
+            print("Epoch {:5d}\tSuc rate: {:.2f}\tAvg reward: {:.2f}\tAvg LSH reward: {:.2f}\tAvg physical inference reward: {:.2f}\tLossμ:{:.3f}\tLossQ1:{:.3f}\tLossQ2:{:.3f}\tTime: {:.1f}".format(int(i/n_cycles),n_success/n_cycles,s_reward/n_cycles,s_reward_lsh/n_cycles,s_reward_p/n_cycles,sum_lossμ/n_cycles, sum_lossQ1/n_cycles, sum_lossQ2/n_cycles, tok-tik),flush=True)
             sum_lossμ = 0
             sum_lossQ1 = 0
             sum_lossQ2 = 0
             n_success = 0
             s_reward = 0
-            s_reward_in = 0
+            s_reward_lsh = 0
+            s_reward_p = 0
             tik = time.time()
         if i%save_freq==0:
 #            print("Saving model...")
