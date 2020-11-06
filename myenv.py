@@ -13,24 +13,24 @@ import numpy as np
 import time
 from itertools import count
 
-BUFFER_SIZE = int(5e3)
+BUFFER_SIZE = int(1e4)
 NOISE_EPSILON = 1
 NOISE_CLIP = 0.5
 RAND_EPSILON = 0.3
 ACTION_L2 = 0.0
-LR = 3e-4
-BATCH_SIZE = 8
+LR = 1e-3
+BATCH_SIZE = 16
 N_BATCHES = 1
-TARGET_REPLACE_ITER = 1
-DELAY_ACTOR_STEPS = 20
+TARGET_REPLACE_ITER = 2
+DELAY_ACTOR_STEPS = 50
 polyak = 0.005
 t_episode = 100
 γ = 1-1/t_episode
-start_timesteps = 25e3
+start_timesteps = 1e5
 REPLAY_K = 4
-LSH_K = 20
-β = 1e-3
-p_ratio = 1e-4
+LSH_K = 22
+β = 1e-4
+p_ratio = 1e-2
 
 def picked_and_lifted_reward(box_pos):
     assert len(box_pos) == 3
@@ -43,7 +43,7 @@ def touched_reward(end_effector_pos, box_pos):
     x1,y1,z1 = end_effector_pos
     x2,y2,z2 = box_pos
     dx,dy,dz = x1-x2,y1-y2,z1-z2
-    return 0. if dx**2 + dy**2 + dz**2 <=0.5**2 else -1.
+    return 0. if dx**2 + dy**2 + dz**2 <=0.1**2 else -1.
         
 def approach_box_reward(end_effector_pos, box_pos):
     assert len(end_effector_pos) == 3
@@ -59,8 +59,9 @@ def intrinsic_counting_reward(state, action):
     return (freq + 0.01)**(-0.5)
         
 class ReplayBuffer(object):
-    def __init__(self, size, obs_dim, ag_dim, dg_dim, a_dim, r_dim, mask_dim, t_episode, replay_k, reward,meta_reward, meta,device):
+    def __init__(self, size, obs_dim, ag_dim, dg_dim, a_dim, r_dim, mask_dim, t_episode, replay_k, reward,meta_reward, meta,device,odevice):
         self.device = device
+        self.odevice = odevice
         self.reward = reward
         self.size = size
         self.obs_dim, self.ag_dim, self.dg_dim, self.a_dim, self.r_dim, self.mask_dim = obs_dim, ag_dim, dg_dim, a_dim, r_dim, mask_dim
@@ -85,6 +86,8 @@ class ReplayBuffer(object):
         self.meta_reward = meta_reward
         
     def store(self, s, a, r, mask, s_):
+        s, a, r, mask, s_ = torch.tensor(s),torch.tensor(a),torch.tensor(r),torch.tensor(mask),torch.tensor(s_)
+        s, a, r, mask, s_ = s.to(self.device), a.to(self.device), r.to(self.device), mask.to(self.device), s_.to(self.device)
         s, s_ = s.detach(), s_.detach()
         index = (self.cnt // t_episode) % self.size
         t_step = self.cnt % t_episode
@@ -144,6 +147,7 @@ class ReplayBuffer(object):
             if not self.meta:
                 r[i] += self.reward(s_ag[i], s_dg[i])
         
+        s, a, r, mask, s_ = s.to(self.odevice), a.to(self.odevice), r.to(self.odevice), mask.to(self.odevice), s_.to(self.odevice)
         return s, a, r, mask, s_
         
 class HashTable(object):
@@ -345,8 +349,8 @@ class TD3(Policy):
         self.μ_tar.load_state_dict(self.μ.state_dict())
         self.Q1_tar.load_state_dict(self.Q1.state_dict())
         self.Q2_tar.load_state_dict(self.Q2.state_dict())
-        self.replay_buffer = ReplayBuffer(BUFFER_SIZE,N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, meta_reward, False, device)
-        self.meta_replay_buffer = ReplayBuffer(int(start_timesteps/t_episode)+1, N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, meta_reward, True, device)
+        self.replay_buffer = ReplayBuffer(BUFFER_SIZE,N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, meta_reward, False, "cpu", device)
+        self.meta_replay_buffer = ReplayBuffer(int(start_timesteps/t_episode)+1, N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, meta_reward, True, "cpu", device)
         self.cnt_step = 0
         self.lossμ, self.lossQ1, self.lossQ2 = 0,0,0
 
@@ -538,7 +542,7 @@ if __name__=="__main__":
     for i in count(start=1):
         # randomly reset robot joint and box position
         manipulator.reset_joint_states(np.random.uniform(-1,1,(15)))
-        world.move_object(box,[np.random.uniform(-1,1),np.random.uniform(-1,1),0.2])
+        world.move_object(box,[np.random.uniform(-1,1),np.random.uniform(-0.5,0.5),0.2])
         
         # run an episode
         for t in range(t_episode):
