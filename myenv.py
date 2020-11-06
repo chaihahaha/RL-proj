@@ -13,16 +13,17 @@ import numpy as np
 import time
 from itertools import count
 
-BUFFER_SIZE = int(1e4)
+BUFFER_SIZE = int(5e3)
 NOISE_EPSILON = 1
 NOISE_CLIP = 0.5
 RAND_EPSILON = 0.3
 ACTION_L2 = 0.0
 LR = 1e-3
 BATCH_SIZE = 16
-N_BATCHES = 1
+N_BATCHES = 2
 TARGET_REPLACE_ITER = 2
-DELAY_ACTOR_STEPS = 50
+DELAY_ACTOR_STEPS = 200
+DELAY_CRITIC_STEPS = 100
 polyak = 0.005
 t_episode = 100
 γ = 1-1/t_episode
@@ -349,8 +350,8 @@ class TD3(Policy):
         self.μ_tar.load_state_dict(self.μ.state_dict())
         self.Q1_tar.load_state_dict(self.Q1.state_dict())
         self.Q2_tar.load_state_dict(self.Q2.state_dict())
-        self.replay_buffer = ReplayBuffer(BUFFER_SIZE,N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, meta_reward, False, "cpu", device)
-        self.meta_replay_buffer = ReplayBuffer(int(start_timesteps/t_episode)+1, N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, meta_reward, True, "cpu", device)
+        self.replay_buffer = ReplayBuffer(BUFFER_SIZE,N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, meta_reward, False, device, device)
+        self.meta_replay_buffer = ReplayBuffer(int(start_timesteps/t_episode)+1, N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, meta_reward, True, device, device)
         self.cnt_step = 0
         self.lossμ, self.lossQ1, self.lossQ2 = 0,0,0
 
@@ -417,9 +418,10 @@ class TD3(Policy):
             s,a,r,mask,s_ = self.replay_buffer.sample(BATCH_SIZE)
         else:
             s,a,r,mask,s_ = self.meta_replay_buffer.sample(BATCH_SIZE)
-        lq1, lq2 = self.update_critic(s,a,r,mask,s_)
-        self.lossQ1 += lq1
-        self.lossQ2 += lq2
+        if self.cnt_step % DELAY_CRITIC_STEPS == 0:
+            lq1, lq2 = self.update_critic(s,a,r,mask,s_)
+            self.lossQ1 += lq1
+            self.lossQ2 += lq2
         
         if self.cnt_step % DELAY_ACTOR_STEPS == 0:
             self.lossμ += self.update_actor(s)
