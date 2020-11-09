@@ -13,7 +13,7 @@ import numpy as np
 import time
 from itertools import count
 
-BUFFER_SIZE = int(5e3)
+BUFFER_SIZE = int(1e3) # if use intrinsic reward, less memory will encourage forgetting false rt_in
 NOISE_EPSILON = 1
 NOISE_CLIP = 0.5
 RAND_EPSILON = 0.3
@@ -27,11 +27,11 @@ DELAY_CRITIC_STEPS = 100
 polyak = 0.005
 t_episode = 100
 γ = 1-1/t_episode
-start_timesteps = 1e5
+start_timesteps = 1e4
 REPLAY_K = 4
 LSH_K = 22
-β = 1e-4
-p_ratio = 1e-2
+β = 1e-1
+p_ratio = 1e-3
 
 def picked_and_lifted_reward(box_pos):
     assert len(box_pos) == 3
@@ -387,11 +387,13 @@ class TD3(Policy):
         # cast to tensor
         st_ = torch.tensor(st_, dtype=torch.float,device=self.device)
         
-        # keep (st, at, rt, st_) in buffer
-        self.replay_buffer.store(st, at_np, rt, 0. if done else γ, st_)
         # keep (st, at, rt_in, st_) in meta training buffer
         if self.cnt_step < start_timesteps:
+            # keep (st, at, rt, st_) in buffer
+            self.replay_buffer.store(st, at_np, rt_env, 0. if done else γ, st_)  # avoid false rt_in
             self.meta_replay_buffer.store(st, at_np, rt_in, 0. if done else γ, st_)
+        else:
+            self.replay_buffer.store(st, at_np, rt, 0. if done else γ, st_)
         
         if self.cnt_step > 2*t_episode:
             for _ in range(N_BATCHES):

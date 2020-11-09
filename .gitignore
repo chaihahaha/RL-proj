@@ -1,4 +1,5 @@
 log
+*.log
 *.ckpt
 *.txt
 *.swp
