@@ -28,8 +28,8 @@ t_episode = 200
 start_timesteps = 1e4
 REPLAY_K = 4
 LSH_K = 18
-β = 1e-1
-p_ratio = 1e-4
+β = 1e-2
+p_ratio = 1e-5
 
 def picked_and_lifted_reward(box_pos):
     assert len(box_pos) == 3
@@ -53,7 +53,7 @@ def approach_box_reward(end_effector_pos, box_pos):
 
 def intrinsic_counting_reward(state, action):
     freq = hashtable.freq(state, action)
-    return (freq + 0.01)**(-0.5)
+    return (freq + 1)**(-0.5)
         
 class ReplayBuffer(object):
     def __init__(self, size, obs_dim, ag_dim, dg_dim, a_dim, r_dim, mask_dim, t_episode, replay_k, reward,meta_reward, meta,device,odevice):
@@ -140,10 +140,10 @@ class ReplayBuffer(object):
         s = torch.cat([sobs, sag, sdg], 1)
         s_ = torch.cat([s_obs, s_ag, s_dg], 1)
         for i in range(len(r)):
-            si,ai,s_i,s_agi, s_dgi = s[i].unsqueeze(0), a[i].unsqueeze(0), s_[i].unsqueeze(0), s_ag[i].unsqueeze(0), s_dg[i].unsqueeze(0)
+            si,ai,s_i = s[i].unsqueeze(0), a[i].unsqueeze(0), s_[i].unsqueeze(0)
             r[i] = self.meta_reward(si, ai, s_i)
-            if not self.meta:
-                r[i] += self.reward(s_agi, s_dgi)
+        if not self.meta:
+            r += self.reward(s_ag, s_dg)
         
         s, a, r, mask, s_ = s.to(self.odevice), a.to(self.odevice), r.to(self.odevice), mask.to(self.odevice), s_.to(self.odevice)
         return s, a, r, mask, s_
@@ -347,7 +347,7 @@ class TD3(Policy):
         self.Q1_tar.load_state_dict(self.Q1.state_dict())
         self.Q2_tar.load_state_dict(self.Q2.state_dict())
 
-        self.meta_reward = lambda s,a,s_: intrinsic_counting_reward(s_,a) * β + torch.mean(self.P(s, a)-s_)* p_ratio
+        self.meta_reward = lambda s,a,s_: intrinsic_counting_reward(s_,a) * β + torch.mean((self.P(s, a)-s_)**2)* p_ratio
         self.replay_buffer = ReplayBuffer(BUFFER_SIZE,N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, self.meta_reward, False, device, device)
         self.meta_replay_buffer = ReplayBuffer(int(start_timesteps/t_episode)+1, N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, self.meta_reward, True, device, device)
         self.cnt_step = 0
@@ -399,7 +399,7 @@ class TD3(Policy):
                 self.update_target()
             
         self.cnt_step += 1
-        return rt_env, rt_p, rt_lsh, self.lossμ*DELAY_ACTOR_STEPS/N_BATCHES, self.lossQ1/N_BATCHES, self.lossQ2/N_BATCHES
+        return rt_env, rt_lsh, rt_p, self.lossμ*DELAY_ACTOR_STEPS/N_BATCHES, self.lossQ1/N_BATCHES, self.lossQ2/N_BATCHES
         
     def update_target(self):
         update_pairs = [(self.μ, self.μ_tar), (self.Q1, self.Q1_tar), (self.Q2, self.Q2_tar)]
