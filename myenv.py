@@ -14,24 +14,22 @@ import time
 from itertools import count
 
 BUFFER_SIZE = int(1e3) # if use intrinsic reward, less memory will encourage forgetting false rt_in
-NOISE_EPSILON = 1
-NOISE_CLIP = 0.5
 RAND_EPSILON = 0.3
 ACTION_L2 = 0.0
 LR = 1e-3
-BATCH_SIZE = 16
+BATCH_SIZE = 8
 N_BATCHES = 2
-TARGET_REPLACE_ITER = 2
-DELAY_ACTOR_STEPS = 200
-DELAY_CRITIC_STEPS = 100
+TARGET_REPLACE_ITER = 8
+DELAY_ACTOR_STEPS = 400
+DELAY_CRITIC_STEPS = 200
 polyak = 0.005
-t_episode = 100
+t_episode = 200
 γ = 1-1/t_episode
 start_timesteps = 1e4
 REPLAY_K = 4
-LSH_K = 22
+LSH_K = 18
 β = 1e-1
-p_ratio = 1e-3
+p_ratio = 1e-4
 
 def picked_and_lifted_reward(box_pos):
     assert len(box_pos) == 3
@@ -44,7 +42,7 @@ def touched_reward(end_effector_pos, box_pos):
     x1,y1,z1 = end_effector_pos
     x2,y2,z2 = box_pos
     dx,dy,dz = x1-x2,y1-y2,z1-z2
-    return 0. if dx**2 + dy**2 + dz**2 <=0.1**2 else -1.
+    return 0. if dx**2 + dy**2 + dz**2 <=0.2**2 else -1.
         
 def approach_box_reward(end_effector_pos, box_pos):
     assert len(end_effector_pos) == 3
@@ -218,17 +216,17 @@ class μNet(nn.Module):
         super(μNet, self).__init__()
         self.norm = norm
         self.max_action = max_action
-        self.fc1 = nn.Linear(N_STATES, 300)
+        self.fc1 = nn.Linear(N_STATES, 5)
         self.fc1.weight.data.normal_(0, 1e-5)   # initialization
-        self.fc2 = nn.Linear(300, 300)
+        self.fc2 = nn.Linear(5, 300)
         self.fc2.weight.data.normal_(0, 1e-5)   # initialization
-        self.fc3 = nn.Linear(300, 300)
+        self.fc3 = nn.Linear(300, 5)
         self.fc3.weight.data.normal_(0, 1e-5)   # initialization
         self.fc4 = nn.Linear(300, 300)
         self.fc4.weight.data.normal_(0, 1e-5)   # initialization
         self.fc5 = nn.Linear(300, 300)
         self.fc5.weight.data.normal_(0, 1e-5)   # initialization
-        self.out = nn.Linear(300, N_ACTIONS)
+        self.out = nn.Linear(5, N_ACTIONS)
         self.out.weight.data.normal_(0, 1e-5)   # initialization
         self.fcn = nn.Linear(N_ACTIONS, N_ACTIONS)
         self.fcn.weight.data.normal_(0, 1e-2)   # initialization
@@ -254,9 +252,9 @@ class QNet(nn.Module):
     def __init__(self, norm):
         super(QNet, self).__init__()
         self.norm = norm
-        self.fc1 = nn.Linear(N_STATES + N_ACTIONS, 300)
+        self.fc1 = nn.Linear(N_STATES + N_ACTIONS, 10)
         self.fc1.weight.data.normal_(0, 1e-5)   # initialization
-        self.fc2 = nn.Linear(300, 300)
+        self.fc2 = nn.Linear(10, 300)
         self.fc2.weight.data.normal_(0, 1e-5)   # initialization
         self.fc3 = nn.Linear(300, 300)
         self.fc3.weight.data.normal_(0, 1e-5)   # initialization
@@ -285,9 +283,9 @@ class PNet(nn.Module):
     def __init__(self, norm):
         super(PNet, self).__init__()
         self.norm = norm
-        self.fc1 = nn.Linear(N_STATES+N_ACTIONS, 300)
+        self.fc1 = nn.Linear(N_STATES+N_ACTIONS, 10)
         self.fc1.weight.data.normal_(0, 1e-5)   # initialization
-        self.fc2 = nn.Linear(300, 300)
+        self.fc2 = nn.Linear(10, 300)
         self.fc2.weight.data.normal_(0, 1e-5)   # initialization
         self.fc3 = nn.Linear(300, 300)
         self.fc3.weight.data.normal_(0, 1e-5)   # initialization
@@ -387,19 +385,16 @@ class TD3(Policy):
         # cast to tensor
         st_ = torch.tensor(st_, dtype=torch.float,device=self.device)
         
+        self.replay_buffer.store(st, at_np, rt, 0. if done else γ, st_)
         # keep (st, at, rt_in, st_) in meta training buffer
         if self.cnt_step < start_timesteps:
-            # keep (st, at, rt, st_) in buffer
-            self.replay_buffer.store(st, at_np, rt_env, 0. if done else γ, st_)  # avoid false rt_in
             self.meta_replay_buffer.store(st, at_np, rt_in, 0. if done else γ, st_)
-        else:
-            self.replay_buffer.store(st, at_np, rt, 0. if done else γ, st_)
         
-        if self.cnt_step > 2*t_episode:
+        if self.cnt_step > 2*t_episode and (self.cnt_step % DELAY_CRITIC_STEPS == 0 or self.cnt_step % DELAY_ACTOR_STEPS == 0):
             for _ in range(N_BATCHES):
                 self.train()
             
-            if ((self.cnt_step//t_episode) % TARGET_REPLACE_ITER == 0) and (self.cnt_step % t_episode == 0):
+        if ((self.cnt_step//t_episode) % TARGET_REPLACE_ITER == 0) and (self.cnt_step % t_episode == 0):
                 self.update_target()
             
         self.cnt_step += 1
@@ -433,7 +428,7 @@ class TD3(Policy):
     def get_action(self, st):
         st = st.unsqueeze(0)
         # cast to numpy
-        if np.random.uniform() < RAND_EPSILON:
+        if np.random.uniform() < RAND_EPSILON or self.cnt_step < start_timesteps:
             at_np = self.env.action.space.sample()
         else:
             # compute action with actor μ
@@ -531,7 +526,6 @@ if __name__=="__main__":
     
 #    print("Loading model...")
 #    td3.load("td3.ckpt")
-    num_episodes = 30000
     save_freq = 200
     
     n_cycles = 50
