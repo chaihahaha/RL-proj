@@ -37,12 +37,10 @@ def picked_and_lifted_reward(box_pos):
     return z>0.5
         
 def touched_reward(end_effector_pos, box_pos):
-    assert len(end_effector_pos) == 3
-    assert len(box_pos) == 3
-    x1,y1,z1 = end_effector_pos
-    x2,y2,z2 = box_pos
+    x1,y1,z1 = end_effector_pos[:,0:1],end_effector_pos[:,1:2],end_effector_pos[:,2:3]
+    x2,y2,z2 = box_pos[:,0:1],box_pos[:,1:2],box_pos[:,2:3]
     dx,dy,dz = x1-x2,y1-y2,z1-z2
-    return 0. if dx**2 + dy**2 + dz**2 <=0.2**2 else -1.
+    return (dx**2 + dy**2 + dz**2 <=0.2**2).float() - 1.
         
 def approach_box_reward(end_effector_pos, box_pos):
     assert len(end_effector_pos) == 3
@@ -86,7 +84,7 @@ class ReplayBuffer(object):
         
     def store(self, s, a, r, mask, s_):
         s, a, r, mask, s_ = torch.tensor(s),torch.tensor(a),torch.tensor(r),torch.tensor(mask),torch.tensor(s_)
-        s, a, r, mask, s_ = s.to(self.device), a.to(self.device), r.to(self.device), mask.to(self.device), s_.to(self.device)
+        s, a, r, mask, s_ = s.to(self.device).reshape(-1), a.to(self.device).reshape(-1), r.to(self.device), mask.to(self.device), s_.to(self.device).reshape(-1)
         s, s_ = s.detach(), s_.detach()
         index = (self.cnt // t_episode) % self.size
         t_step = self.cnt % t_episode
@@ -142,9 +140,10 @@ class ReplayBuffer(object):
         s = torch.cat([sobs, sag, sdg], 1)
         s_ = torch.cat([s_obs, s_ag, s_dg], 1)
         for i in range(len(r)):
-            r[i] = self.meta_reward(s_[i], a[i])
+            si,ai,s_i,s_agi, s_dgi = s[i].unsqueeze(0), a[i].unsqueeze(0), s_[i].unsqueeze(0), s_ag[i].unsqueeze(0), s_dg[i].unsqueeze(0)
+            r[i] = self.meta_reward(si, ai, s_i)
             if not self.meta:
-                r[i] += self.reward(s_ag[i], s_dg[i])
+                r[i] += self.reward(s_agi, s_dgi)
         
         s, a, r, mask, s_ = s.to(self.odevice), a.to(self.odevice), r.to(self.odevice), mask.to(self.odevice), s_.to(self.odevice)
         return s, a, r, mask, s_
@@ -313,11 +312,10 @@ class PNet(nn.Module):
         return out
 
 class TD3(Policy):
-    def __init__(self, env, states, actions, robot, reward, meta_reward, device):
+    def __init__(self, env, states, actions, robot, reward, device):
         super(TD3, self).__init__(states, actions)
         self.robot = robot
         self.reward = reward
-        self.meta_reward = meta_reward
         self.env = env
         self.states = states
         self.actions = actions
@@ -348,8 +346,10 @@ class TD3(Policy):
         self.μ_tar.load_state_dict(self.μ.state_dict())
         self.Q1_tar.load_state_dict(self.Q1.state_dict())
         self.Q2_tar.load_state_dict(self.Q2.state_dict())
-        self.replay_buffer = ReplayBuffer(BUFFER_SIZE,N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, meta_reward, False, device, device)
-        self.meta_replay_buffer = ReplayBuffer(int(start_timesteps/t_episode)+1, N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, meta_reward, True, device, device)
+
+        self.meta_reward = lambda s,a,s_: intrinsic_counting_reward(s_,a) * β + torch.mean(self.P(s, a)-s_)* p_ratio
+        self.replay_buffer = ReplayBuffer(BUFFER_SIZE,N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, self.meta_reward, False, device, device)
+        self.meta_replay_buffer = ReplayBuffer(int(start_timesteps/t_episode)+1, N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, self.meta_reward, True, device, device)
         self.cnt_step = 0
         self.lossμ, self.lossQ1, self.lossQ2 = 0,0,0
 
@@ -357,10 +357,11 @@ class TD3(Policy):
         self.lossμ, self.lossQ1, self.lossQ2 = 0,0,0
         
         # get state $s_t$
-        st = self.states.vec_torch_data.float().to(self.device)
+        st = self.states.vec_torch_data.float().to(self.device).unsqueeze(0)
         
         # get action $a_t$
         at_np = self.get_action(st)
+        at = torch.tensor(at_np, device=self.device).unsqueeze(0)
 
         # apply action
         self.set_action_data(at_np)
@@ -368,27 +369,27 @@ class TD3(Policy):
         
         # step in environment to get next state $s_{t+1}$, reward $r_t$
         st_, _, _, info = self.env.step()
+        st_ = torch.tensor(st_, dtype=torch.float,device=self.device).unsqueeze(0)
 
-        rt_p = self.update_physical_predictor(st, at_np, st_)
+
+        rt_p = self.update_physical_predictor(st, at, st_)
         # add to hash table and compute intrinsic reward
-        hashtable.add(st_, at_np)
-        rt_lsh = self.meta_reward(st_, at_np)
-
-        rt_in = p_ratio * rt_p + β * rt_lsh
+        hashtable.add(st_, at)
+        rt_in = self.meta_reward(st, at, st_)
+        rt_lsh = rt_in - rt_p
 
         # take last but one state as achieved goal, take last state as desired goal
-        rt_env = self.reward(self.states()[-2],self.states()[-1])
+        sag = torch.tensor(self.states()[-2]).unsqueeze(0)
+        sdg = torch.tensor(self.states()[-1]).unsqueeze(0)
+        rt_env = self.reward(sag, sdg).to(self.device)
 
         # total reward is sum of env reward and intrinsic reward
         rt = rt_env + rt_in
-
-        # cast to tensor
-        st_ = torch.tensor(st_, dtype=torch.float,device=self.device)
         
-        self.replay_buffer.store(st, at_np, rt, 0. if done else γ, st_)
+        self.replay_buffer.store(st, at, rt, 0. if done else γ, st_)
         # keep (st, at, rt_in, st_) in meta training buffer
         if self.cnt_step < start_timesteps:
-            self.meta_replay_buffer.store(st, at_np, rt_in, 0. if done else γ, st_)
+            self.meta_replay_buffer.store(st, at, rt_in, 0. if done else γ, st_)
         
         if self.cnt_step > 2*t_episode and (self.cnt_step % DELAY_CRITIC_STEPS == 0 or self.cnt_step % DELAY_ACTOR_STEPS == 0):
             for _ in range(N_BATCHES):
@@ -426,7 +427,6 @@ class TD3(Policy):
             
         
     def get_action(self, st):
-        st = st.unsqueeze(0)
         # cast to numpy
         if np.random.uniform() < RAND_EPSILON or self.cnt_step < start_timesteps:
             at_np = self.env.action.space.sample()
@@ -439,15 +439,12 @@ class TD3(Policy):
         return at_np
         
     def update_physical_predictor(self, s, a, s_):
-        s = s.unsqueeze(0).to(self.device)
-        a = torch.tensor(a, device=self.device).unsqueeze(0)
-        s_ = torch.tensor(s_, device=self.device).unsqueeze(0)
         s_p = self.P(s, a)
         lossP = torch.mean((s_p-s_)**2)
         lossP.backward()
         self.optimP.step()
         self.optimP.zero_grad()
-        return lossP
+        return lossP * p_ratio
 
     def update_actor(self, si):
         ai = self.μ(si)
@@ -522,7 +519,7 @@ if __name__=="__main__":
     env.reset()
     
     hashtable = HashTable(LSH_K, N_STATES+N_ACTIONS)
-    td3 = TD3(env, states, action,manipulator,touched_reward, intrinsic_counting_reward, "cuda")
+    td3 = TD3(env, states, action,manipulator,touched_reward, "cuda")
     
 #    print("Loading model...")
 #    td3.load("td3.ckpt")
@@ -558,7 +555,7 @@ if __name__=="__main__":
         # collect statistics of #n_cycles results
         if i%n_cycles==0:
             tok = time.time()
-            print("Epoch {:5d}\tSuc rate: {:.2f}\tAvg reward: {:.2f}\tAvg LSH reward: {:.2f}\tAvg physical inference reward: {:.2f}\tLossμ:{:.3f}\tLossQ1:{:.3f}\tLossQ2:{:.3f}\tTime: {:.1f}".format(int(i/n_cycles),n_success/n_cycles,s_reward/n_cycles,s_reward_lsh/n_cycles,s_reward_p/n_cycles,sum_lossμ/n_cycles, sum_lossQ1/n_cycles, sum_lossQ2/n_cycles, tok-tik),flush=True)
+            print("Epoch {:5d}\tSuc rate: {:.2f}\tAvg reward: {:.2f}\tAvg LSH reward: {:.4f}\tAvg physical inference reward: {:.4f}\tLossμ:{:.3f}\tLossQ1:{:.3f}\tLossQ2:{:.3f}\tTime: {:.1f}".format(int(i/n_cycles),n_success/n_cycles,s_reward/n_cycles,s_reward_lsh/n_cycles,s_reward_p/n_cycles,sum_lossμ/n_cycles, sum_lossQ1/n_cycles, sum_lossQ2/n_cycles, tok-tik),flush=True)
             sum_lossμ = 0
             sum_lossQ1 = 0
             sum_lossQ2 = 0
