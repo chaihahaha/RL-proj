@@ -372,7 +372,7 @@ class TD3(Policy):
         st_ = torch.tensor(st_, dtype=torch.float,device=self.device).unsqueeze(0)
 
 
-        rt_p = self.update_physical_predictor(st, at, st_)
+        rt_p = self.update_physical_predictor(st, at, st_).item()
         # add to hash table and compute intrinsic reward
         hashtable.add(st_, at)
         rt_in = self.meta_reward(st, at, st_)
@@ -381,7 +381,7 @@ class TD3(Policy):
         # take last but one state as achieved goal, take last state as desired goal
         sag = torch.tensor(self.states()[-2]).unsqueeze(0)
         sdg = torch.tensor(self.states()[-1]).unsqueeze(0)
-        rt_env = self.reward(sag, sdg).to(self.device)
+        rt_env = self.reward(sag, sdg)[0].item()
 
         # total reward is sum of env reward and intrinsic reward
         rt = rt_env + rt_in
