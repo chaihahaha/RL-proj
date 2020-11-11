@@ -16,7 +16,7 @@ from itertools import count
 BUFFER_SIZE = int(1e3) # if use intrinsic reward, less memory will encourage forgetting false rt_in
 RAND_EPSILON = 0.3
 ACTION_L2 = 0.0
-LR = 1e-3
+LR = 3e-4
 BATCH_SIZE = 16
 N_BATCHES = 4
 TARGET_REPLACE_ITER = 16
@@ -28,7 +28,7 @@ t_episode = 200
 start_timesteps = 1e4
 REPLAY_K = 4
 LSH_K = 18
-β = 1e-2
+β = 1e-3
 p_ratio = 1e-5
 
 def picked_and_lifted_reward(box_pos):
