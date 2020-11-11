@@ -16,15 +16,15 @@ from itertools import count
 BUFFER_SIZE = int(1e3) # if use intrinsic reward, less memory will encourage forgetting false rt_in
 RAND_EPSILON = 0.3
 ACTION_L2 = 0.0
-LR = 3e-4
+LR = 1e-3
 BATCH_SIZE = 32
 N_BATCHES = 8
-TARGET_REPLACE_ITER = 16
+TARGET_REPLACE_ITER = 4
 DELAY_ACTOR_STEPS = 1600
 DELAY_CRITIC_STEPS = 800
 polyak = 0.005
 t_episode = 200
-γ = 1-1/t_episode
+γ = 0.991
 start_timesteps = 1e4
 REPLAY_K = 4
 LSH_K = 18
@@ -275,7 +275,9 @@ class QNet(nn.Module):
         x = self.act(self.fc3(x))
         #x = self.act(self.fc4(x))
         #x = self.act(self.fc5(x))
+        #print("tanh:",self.tanh(self.out(x))[0].item())
         out = self.tanh(self.out(x))/(1-γ)
+        #print("out:",out[0].item())
         return out
 
 class PNet(nn.Module):
@@ -385,6 +387,11 @@ class TD3(Policy):
 
         # total reward is sum of env reward and intrinsic reward
         rt = rt_env + rt_in
+
+        #q = self.Q1(st, at)
+        #print("Q:{:.3f}\trt:{:.3f}".format(q.item(),rt.item()))
+        #if self.cnt_step % t_episode == 0:
+        #    print("epi{:d}".format(self.cnt_step//t_episode),flush=True)
         
         self.replay_buffer.store(st, at, rt, 0. if done else γ, st_)
         # keep (st, at, rt_in, st_) in meta training buffer
@@ -458,6 +465,11 @@ class TD3(Policy):
         return lossμ.item()
         
     def update_critic(self,si,ai,ri,mask,si_):
+        #print("si:",si[0])
+        #print("ai:",ai[0])
+        #print("si_:",si_[0])
+        #print("ri:",ri[0])
+        #print("mask:",mask[0])
         with torch.no_grad():
             ai_ = self.μ_tar(si_)
             ai_ = ai_.clamp(-self.max_action, self.max_action)
@@ -465,14 +477,20 @@ class TD3(Policy):
             Q1_ = self.Q1_tar(si_,ai_)
             Q2_ = self.Q2_tar(si_,ai_)
             y = ri + mask * torch.min(Q1_, Q2_)
+        #    print("Q_:",torch.min(Q1_, Q2_)[0])
 
+        #print("Q*:",y[0])
         Q1 = self.Q1(si, ai) 
+        #print("Q1:",Q1[0],flush=True)
         lossQ1 = torch.mean((y-Q1)**2)
         lossQ1.backward()
         self.optimQ1.step()
         self.optimμ.zero_grad()
         self.optimQ1.zero_grad()
         self.optimQ2.zero_grad()
+        #with torch.no_grad():
+        #    Q1 = self.Q1(si, ai) 
+        #print("Q1:",Q1[0],flush=True)
         
         Q2 = self.Q2(si, ai)
         lossQ2 = torch.mean((y-Q2)**2)
