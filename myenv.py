@@ -13,21 +13,22 @@ import numpy as np
 import time
 from itertools import count
 
-BUFFER_SIZE = int(1e3) # if use intrinsic reward, less memory will encourage forgetting false rt_in
-RAND_EPSILON = 0.3
-NOISE_CLIP = 0.2
+BUFFER_SIZE = int(3e3) # if use intrinsic reward, less memory will encourage forgetting false rt_in
+RAND_EPSILON = 0.5
+NOISE_CLIP = 1
+NOISE_SCALE = 1
 ACTION_L2 = 0.0
 LR = 1e-3
-BATCH_SIZE = 256
+BATCH_SIZE = 1000
 N_BATCHES = 4
-TARGET_REPLACE_ITER = 8
+TARGET_REPLACE_STEPS = 200
 DELAY_ACTOR_STEPS = 400
 DELAY_CRITIC_STEPS = 200
-polyak = 0.005
+polyak = 0.05
 t_episode = 200
 γ = 0.991
-start_timesteps = 1e4
-REPLAY_K = 4
+start_timesteps = 1e2
+REPLAY_K = 3
 LSH_K = 18
 β = 2e-3
 p_ratio = 2e-5
@@ -125,6 +126,14 @@ class ReplayBuffer(object):
         s_ag = self.s_ag[episode_idxs, t_samples].clone()
         s_dg = self.s_dg[episode_idxs, t_samples].clone()
 
+        #print("==========before=========")
+        #print("sobs sag sdg")
+        #print(sobs,sag,sdg)
+        #print("a mask r")
+        #print(a,mask)
+        #print("s_obs s_ag s_dg")
+        #print(s_obs,s_ag,s_dg)
+
         # Select future time indexes proportional with probability future_p. These
         # will be used for HER replay by substituting in future goals.
         her_indexes = np.where(np.random.uniform(size=batch_size) < self.future_p)
@@ -135,7 +144,15 @@ class ReplayBuffer(object):
         # Replace goal with achieved goal but only for the previously-selected
         # HER transitions (as defined by her_indexes). For the other transitions,
         # keep the original goal.
+        #print("t_samples")
+        #print(t_samples)
+        #print("future_offset")
+        #print(future_offset)
+        #print("her_indexes, future_t")
+        #print(her_indexes, future_t)
         future_ag = self.sag[episode_idxs[her_indexes], future_t]
+        #print("future_ag")
+        #print(future_ag)
         sdg[her_indexes] = future_ag
         s_dg[her_indexes] = future_ag
         
@@ -148,6 +165,13 @@ class ReplayBuffer(object):
             r += self.reward(s_ag, s_dg)
         else:
             r += -1
+        #print("==========after=========")
+        #print("sobs sag sdg")
+        #print(sobs,sag,sdg)
+        #print("a mask r")
+        #print(a,mask,r)
+        #print("s_obs s_ag s_dg")
+        #print(s_obs,s_ag,s_dg)
         
         s, a, r, mask, s_ = s.to(self.odevice), a.to(self.odevice), r.to(self.odevice), mask.to(self.odevice), s_.to(self.odevice)
         return s, a, r, mask, s_
@@ -215,24 +239,25 @@ class Normalizer(object):
         return x
 
 class μNet(nn.Module):
-    def __init__(self, max_action, norm):
+    def __init__(self, high, low, norm):
         super(μNet, self).__init__()
         self.norm = norm
-        self.max_action = max_action
+        self.high = high
+        self.low = low
         self.fc1 = nn.Linear(N_STATES, 10)
-        self.fc1.weight.data.normal_(0, 1e-5)   # initialization
+        self.fc1.weight.data.normal_(0, 1e-3)   # initialization
         self.fc2 = nn.Linear(10, 300)
-        self.fc2.weight.data.normal_(0, 1e-5)   # initialization
-        self.fc3 = nn.Linear(300, 10)
-        self.fc3.weight.data.normal_(0, 1e-5)   # initialization
+        self.fc2.weight.data.normal_(0, 1e-3)   # initialization
+        self.fc3 = nn.Linear(300, 300)
+        self.fc3.weight.data.normal_(0, 1e-3)   # initialization
         self.fc4 = nn.Linear(300, 300)
-        self.fc4.weight.data.normal_(0, 1e-5)   # initialization
-        self.fc5 = nn.Linear(300, 300)
-        self.fc5.weight.data.normal_(0, 1e-5)   # initialization
+        self.fc4.weight.data.normal_(0, 1e-3)   # initialization
+        self.fc5 = nn.Linear(300, 10)
+        self.fc5.weight.data.normal_(0, 1e-3)   # initialization
         self.out = nn.Linear(10, N_ACTIONS)
-        self.out.weight.data.normal_(0, 1e-5)   # initialization
+        self.out.weight.data.normal_(0, 1e-3)   # initialization
         self.fcn = nn.Linear(N_ACTIONS, N_ACTIONS)
-        self.fcn.weight.data.normal_(0, 1e-5)   # initialization
+        self.fcn.weight.data.normal_(0, 1e-3)   # initialization
         self.tanh = nn.Tanh()
         self.act = nn.LeakyReLU(0.2)
         
@@ -242,30 +267,37 @@ class μNet(nn.Module):
         x = self.act(self.fc1(x))
         x = self.act(self.fc2(x))
         x = self.act(self.fc3(x))
-        #x = self.act(self.fc4(x))
-        #x = self.act(self.fc5(x))
+        x = self.act(self.fc4(x))
+        x = self.act(self.fc5(x))
         x = self.out(x)
-        x = self.tanh(x) 
-        noise = self.fcn(torch.rand_like(x)).clamp(-NOISE_CLIP, NOISE_CLIP)
-        out = x * self.max_action + noise
-        return out
+        #noise = self.fcn(torch.rand_like(x)).clamp(-NOISE_CLIP, NOISE_CLIP)
+        #x += noise
+        x = self.clip(x)
+        return x
+
+    def clip(self, x):
+        out = []
+        for i in range(len(self.high)):
+            out.append((self.high[i] - self.low[i]) * (self.tanh(x[:, i]) + 1)/2 + self.low[i])
+        return torch.stack(out, dim=1)
+
         
 class QNet(nn.Module):
     def __init__(self, norm):
         super(QNet, self).__init__()
         self.norm = norm
-        self.fc1 = nn.Linear(N_STATES + N_ACTIONS, 20)
-        self.fc1.weight.data.normal_(0, 1e-5)   # initialization
-        self.fc2 = nn.Linear(20, 300)
-        self.fc2.weight.data.normal_(0, 1e-5)   # initialization
+        self.fc1 = nn.Linear(N_STATES + N_ACTIONS, 40)
+        self.fc1.weight.data.normal_(0, 1e-3)   # initialization
+        self.fc2 = nn.Linear(40, 300)
+        self.fc2.weight.data.normal_(0, 1e-3)   # initialization
         self.fc3 = nn.Linear(300, 300)
-        self.fc3.weight.data.normal_(0, 1e-5)   # initialization
+        self.fc3.weight.data.normal_(0, 1e-3)   # initialization
         self.fc4 = nn.Linear(300, 300)
-        self.fc4.weight.data.normal_(0, 1e-5)   # initialization
+        self.fc4.weight.data.normal_(0, 1e-3)   # initialization
         self.fc5 = nn.Linear(300, 300)
-        self.fc5.weight.data.normal_(0, 1e-5)   # initialization
+        self.fc5.weight.data.normal_(0, 1e-3)   # initialization
         self.out = nn.Linear(300, 1)
-        self.out.weight.data.normal_(0, 1e-5)   # initialization
+        self.out.weight.data.normal_(0, 1e-3)   # initialization
         self.tanh = nn.Tanh()
         self.act = nn.LeakyReLU(0.2)
 
@@ -274,6 +306,7 @@ class QNet(nn.Module):
         x = torch.cat([x1,x2],dim=1)
         x = self.act(self.fc1(x))
         x = self.act(self.fc2(x))
+        x = self.act(self.fc3(x))
         #x = self.act(self.fc4(x))
         #x = self.act(self.fc5(x))
         #print("tanh:",self.tanh(self.out(x))[0].item())
@@ -286,17 +319,17 @@ class PNet(nn.Module):
         super(PNet, self).__init__()
         self.norm = norm
         self.fc1 = nn.Linear(N_STATES+N_ACTIONS, 20)
-        self.fc1.weight.data.normal_(0, 1e-5)   # initialization
+        self.fc1.weight.data.normal_(0, 1e-3)   # initialization
         self.fc2 = nn.Linear(20, 300)
-        self.fc2.weight.data.normal_(0, 1e-5)   # initialization
+        self.fc2.weight.data.normal_(0, 1e-3)   # initialization
         self.fc3 = nn.Linear(300, 300)
-        self.fc3.weight.data.normal_(0, 1e-5)   # initialization
+        self.fc3.weight.data.normal_(0, 1e-3)   # initialization
         self.fc4 = nn.Linear(300, 300)
-        self.fc4.weight.data.normal_(0, 1e-5)   # initialization
+        self.fc4.weight.data.normal_(0, 1e-3)   # initialization
         self.fc5 = nn.Linear(300, 300)
-        self.fc5.weight.data.normal_(0, 1e-5)   # initialization
+        self.fc5.weight.data.normal_(0, 1e-3)   # initialization
         self.out = nn.Linear(300, N_STATES)
-        self.out.weight.data.normal_(0, 1e-5)   # initialization
+        self.out.weight.data.normal_(0, 1e-3)   # initialization
         self.tanh = nn.Tanh()
         self.act = nn.LeakyReLU(0.2)
         
@@ -323,9 +356,11 @@ class TD3(Policy):
         self.actions = actions
         self.action_data = None
         self.device = device
-        self.max_action = np.max(np.abs(actions.bounds()))
+        self.high = actions.space.high
+        self.low = actions.space.low
+        print(self.high, self.low)
         self.norm = Normalizer(N_STATES,1e3, device)
-        self.μ = μNet(self.max_action, self.norm)
+        self.μ = μNet(self.high,self.low, self.norm)
         self.μ.to(device)
         self.Q1, self.Q2 = QNet(self.norm), QNet(self.norm)
         self.Q1.to(self.device)
@@ -340,7 +375,7 @@ class TD3(Policy):
         self.optimQ2 = torch.optim.Adam(trainableQ2, lr=LR)
         trainableP = list(filter(lambda p: p.requires_grad, self.P.parameters()))
         self.optimP = torch.optim.Adam(trainableP, lr=LR)
-        self.μ_tar = μNet(self.max_action, self.norm)
+        self.μ_tar = μNet(self.high,self.low, self.norm)
         self.Q1_tar, self.Q2_tar = QNet(self.norm), QNet(self.norm)
         self.μ_tar.to(device)
         self.Q1_tar.to(self.device)
@@ -375,24 +410,24 @@ class TD3(Policy):
         st_ = torch.tensor(st_, dtype=torch.float,device=self.device).unsqueeze(0)
 
 
-        rt_p = self.update_physical_predictor(st, at, st_).item()
         # add to hash table and compute intrinsic reward
         hashtable.add(st_, at)
-        rt_in = self.meta_reward(st, at, st_).item()
-        rt_lsh = rt_in - rt_p
 
         # take last but one state as achieved goal, take last state as desired goal
         sag = torch.tensor(self.states()[-2]).unsqueeze(0)
         sdg = torch.tensor(self.states()[-1]).unsqueeze(0)
         rt_env = self.reward(sag, sdg)[0].item()
 
-        # total reward is sum of env reward and intrinsic reward
-        rt = rt_env + rt_in
-
+        #with torch.no_grad():
+        #    ai_ = self.μ_tar(st_)
+        #    ai_ = ai_.clamp(-self.max_action, self.max_action)
+        #
+        #    Q1_ = self.Q1_tar(st_,ai_)
+        #    Q2_ = self.Q2_tar(st_,ai_)
         #q = self.Q1(st, at)
-        #print("Q:{:.3f}\trt:{:.3f}".format(q.item(),rt.item()))
         #if self.cnt_step % t_episode == 0:
         #    print("epi{:d}".format(self.cnt_step//t_episode),flush=True)
+        #print("Q:{:.3f}\tQ*:{:.3f}\trt:{:.3f}".format(q.item(),Q1_.item(),rt_env))
         
         self.replay_buffer.store(st, at, 0. if done else γ, st_)
         # keep (st, at, rt_in, st_) in meta training buffer
@@ -403,20 +438,17 @@ class TD3(Policy):
             for _ in range(N_BATCHES):
                 self.train()
             
-        if ((self.cnt_step//t_episode) % TARGET_REPLACE_ITER == 0) and (self.cnt_step % t_episode == 0):
-                self.update_target()
+        if self.cnt_step % TARGET_REPLACE_STEPS == 0:
+            self.update_target()
             
         self.cnt_step += 1
-        return rt_env, rt_lsh, rt_p, self.lossμ*(DELAY_ACTOR_STEPS//t_episode)/N_BATCHES, self.lossQ1*(DELAY_CRITIC_STEPS//t_episode)/N_BATCHES, self.lossQ2*(DELAY_CRITIC_STEPS//t_episode)/N_BATCHES
+        return rt_env, self.lossμ*(DELAY_ACTOR_STEPS//t_episode)/N_BATCHES, self.lossQ1*(DELAY_CRITIC_STEPS//t_episode)/N_BATCHES, self.lossQ2*(DELAY_CRITIC_STEPS//t_episode)/N_BATCHES
         
     def update_target(self):
         update_pairs = [(self.μ, self.μ_tar), (self.Q1, self.Q1_tar), (self.Q2, self.Q2_tar)]
         for i, i_tar in update_pairs:
-            p = i.named_parameters()
-            p_tar = i_tar.named_parameters()
-            d_tar = dict(p_tar)
-            for name, param in p:
-                d_tar[name].data = polyak*param.data + (1-polyak) * d_tar[name].data
+            for param, target_param in zip(i.parameters(), i_tar.parameters()):
+                target_param.data.copy_(polyak * param.data + (1 - polyak) * target_param.data)
         
     def train(self):
         if self.cnt_step >= start_timesteps:
@@ -428,6 +460,7 @@ class TD3(Policy):
             lq1, lq2 = self.update_critic(s,a,r,mask,s_)
             self.lossQ1 += lq1
             self.lossQ2 += lq2
+            self.rt_p = self.update_physical_predictor(s, a, s_).item()
         
         if self.cnt_step % DELAY_ACTOR_STEPS == 0:
             self.lossμ += self.update_actor(s)
@@ -442,7 +475,8 @@ class TD3(Policy):
             # compute action with actor μ
             with torch.no_grad():
                 at = self.μ(st)
-            at = at.clamp(-self.max_action, self.max_action)
+            #for i in range(len(self.high)):
+            #    at[:, i] = at[:, i].clamp(-self.low[i], self.high[i])
             at_np = at.detach().cpu().numpy()[0]
         return at_np
         
@@ -460,6 +494,7 @@ class TD3(Policy):
         lossμ = -torch.mean(Q1) + ACTION_L2 * torch.mean(ai**2)
         lossμ.backward()
         #print("fcn layer grad:",self.μ.fcn.weight.grad)
+        #print("fcn layer:",self.μ.fcn.weight)
         self.optimμ.step()
         self.optimμ.zero_grad()
         self.optimQ1.zero_grad()
@@ -474,7 +509,10 @@ class TD3(Policy):
         #print("mask:",mask[0])
         with torch.no_grad():
             ai_ = self.μ_tar(si_)
-            ai_ = ai_.clamp(-self.max_action, self.max_action)
+            noise = (torch.randn_like(ai_) * NOISE_SCALE).clamp(-NOISE_CLIP, NOISE_CLIP)
+            ai_ += noise
+            for i in range(len(self.high)):
+                ai_[:, i] = ai_[:, i].clamp(-self.low[i], self.high[i])
         
             Q1_ = self.Q1_tar(si_,ai_)
             Q2_ = self.Q2_tar(si_,ai_)
@@ -490,10 +528,7 @@ class TD3(Policy):
         self.optimμ.zero_grad()
         self.optimQ1.zero_grad()
         self.optimQ2.zero_grad()
-        #with torch.no_grad():
-        #    Q1 = self.Q1(si, ai) 
-        #print("Q1:",Q1[0],flush=True)
-        
+
         Q2 = self.Q2(si, ai)
         lossQ2 = torch.mean((y-Q2)**2)
         lossQ2.backward()
@@ -548,8 +583,6 @@ if __name__=="__main__":
     n_cycles = 10
     n_success = 0
     s_reward = 0
-    s_reward_lsh = 0
-    s_reward_p = 0
     sum_lossμ = 0
     sum_lossQ1 = 0
     sum_lossQ2 = 0
@@ -562,27 +595,23 @@ if __name__=="__main__":
         # run an episode
         for t in range(t_episode):
             done = (t >= t_episode - 1)
-            reward, reward_lsh, reward_p, lossμ, lossQ1, lossQ2 = td3.learn(done)
+            reward, lossμ, lossQ1, lossQ2 = td3.learn(done)
             sum_lossμ += lossμ
             sum_lossQ1 += lossQ1
             sum_lossQ2 += lossQ2
             s_reward += reward
-            s_reward_lsh += reward_lsh
-            s_reward_p += reward_p
         n_success += 1 if success(reward) else 0
         #print("SUCCESS" if done else "FAIL",flush=True)
         
         # collect statistics of #n_cycles results
         if i%n_cycles==0:
             tok = time.time()
-            print("Epoch {:5d}\tSuc rate: {:.2f}\tAvg reward: {:.2f}\tAvg LSH reward: {:.4f}\tAvg physical inference reward: {:.4f}\tLossμ:{:.3f}\tLossQ1:{:.3f}\tLossQ2:{:.3f}\tTime: {:.1f}".format(int(i/n_cycles),n_success/n_cycles,s_reward/n_cycles,s_reward_lsh/n_cycles,s_reward_p/n_cycles,sum_lossμ/n_cycles, sum_lossQ1/n_cycles, sum_lossQ2/n_cycles, tok-tik),flush=True)
+            print("Epoch {:5d}\tSuc rate: {:.2f}\tAvg reward: {:.2f}\tLossμ:{:.3f}\tLossQ1:{:.3f}\tLossQ2:{:.3f}\tTime: {:.1f}".format(int(i/n_cycles),n_success/n_cycles,s_reward/n_cycles,sum_lossμ/n_cycles, sum_lossQ1/n_cycles, sum_lossQ2/n_cycles, tok-tik),flush=True)
             sum_lossμ = 0
             sum_lossQ1 = 0
             sum_lossQ2 = 0
             n_success = 0
             s_reward = 0
-            s_reward_lsh = 0
-            s_reward_p = 0
             tik = time.time()
         if i%save_freq==0:
 #            print("Saving model...")
