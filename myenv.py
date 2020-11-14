@@ -13,7 +13,7 @@ import numpy as np
 import time
 from itertools import count
 
-BUFFER_SIZE = int(3e3) # if use intrinsic reward, less memory will encourage forgetting false rt_in
+BUFFER_SIZE = int(3e2) # if use intrinsic reward, less memory will encourage forgetting false rt_in
 RAND_EPSILON = 0.3
 NOISE_CLIP = 0.5
 NOISE_SCALE = 0.2
@@ -24,9 +24,9 @@ N_BATCHES = 4
 TARGET_REPLACE_STEPS = 200
 DELAY_ACTOR_STEPS = 400
 DELAY_CRITIC_STEPS = 200
-polyak = 0.05
+polyak = 0.23
 t_episode = 200
-γ = 0.991
+γ = 0.998
 start_timesteps = 1e4
 REPLAY_K = 4
 LSH_K = 18
