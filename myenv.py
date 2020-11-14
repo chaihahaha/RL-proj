@@ -3,7 +3,7 @@ from pyrobolearn.envs import Env
 from pyrobolearn.policies import Policy
 from pyrobolearn.states.body_states import DistanceState, PositionState, VelocityState
 from pyrobolearn.states import JointPositionState, JointVelocityState, LinkWorldPositionState, LinkWorldVelocityState
-from pyrobolearn.actions import JointPositionChangeAction
+from pyrobolearn.actions import JointPositionAction
 from pyrobolearn.terminal_conditions import TerminalCondition
 
 import torch
@@ -14,12 +14,12 @@ import time
 from itertools import count
 
 BUFFER_SIZE = int(3e3) # if use intrinsic reward, less memory will encourage forgetting false rt_in
-RAND_EPSILON = 0.5
-NOISE_CLIP = 1
-NOISE_SCALE = 1
+RAND_EPSILON = 0.3
+NOISE_CLIP = 0.5
+NOISE_SCALE = 0.2
 ACTION_L2 = 0.0
 LR = 1e-3
-BATCH_SIZE = 1000
+BATCH_SIZE = 256
 N_BATCHES = 4
 TARGET_REPLACE_STEPS = 200
 DELAY_ACTOR_STEPS = 400
@@ -27,8 +27,8 @@ DELAY_CRITIC_STEPS = 200
 polyak = 0.05
 t_episode = 200
 γ = 0.991
-start_timesteps = 1e2
-REPLAY_K = 3
+start_timesteps = 1e4
+REPLAY_K = 4
 LSH_K = 18
 β = 2e-3
 p_ratio = 2e-5
@@ -160,7 +160,7 @@ class ReplayBuffer(object):
         s_ = torch.cat([s_obs, s_ag, s_dg], 1)
         for i in range(len(r)):
             si,ai,s_i = s[i].unsqueeze(0), a[i].unsqueeze(0), s_[i].unsqueeze(0)
-            r[i] = self.meta_reward(si, ai, s_i).detach()
+            r[i] = self.meta_reward(si, ai, s_i)
         if not self.meta:
             r += self.reward(s_ag, s_dg)
         else:
@@ -239,11 +239,9 @@ class Normalizer(object):
         return x
 
 class μNet(nn.Module):
-    def __init__(self, high, low, norm):
+    def __init__(self, norm):
         super(μNet, self).__init__()
         self.norm = norm
-        self.high = high
-        self.low = low
         self.fc1 = nn.Linear(N_STATES, 10)
         self.fc1.weight.data.normal_(0, 1e-3)   # initialization
         self.fc2 = nn.Linear(10, 300)
@@ -254,7 +252,7 @@ class μNet(nn.Module):
         self.fc4.weight.data.normal_(0, 1e-3)   # initialization
         self.fc5 = nn.Linear(300, 10)
         self.fc5.weight.data.normal_(0, 1e-3)   # initialization
-        self.out = nn.Linear(10, N_ACTIONS)
+        self.out = nn.Linear(300, N_ACTIONS)
         self.out.weight.data.normal_(0, 1e-3)   # initialization
         self.fcn = nn.Linear(N_ACTIONS, N_ACTIONS)
         self.fcn.weight.data.normal_(0, 1e-3)   # initialization
@@ -262,26 +260,19 @@ class μNet(nn.Module):
         self.act = nn.LeakyReLU(0.2)
         
 
-    def forward(self, x):
-        x = self.norm.normalize(x)
-        x = self.act(self.fc1(x))
+    def forward(self, state):
+        sl = self.norm.normalize(state)
+        x = self.act(self.fc1(sl))
         x = self.act(self.fc2(x))
-        x = self.act(self.fc3(x))
-        x = self.act(self.fc4(x))
-        x = self.act(self.fc5(x))
+        #x = self.act(self.fc3(x))
+        #x = self.act(self.fc4(x))
+        #x = self.act(self.fc5(x))
         x = self.out(x)
         #noise = self.fcn(torch.rand_like(x)).clamp(-NOISE_CLIP, NOISE_CLIP)
         #x += noise
-        x = self.clip(x)
-        return x
+        al = self.tanh(x)
+        return al
 
-    def clip(self, x):
-        out = []
-        for i in range(len(self.high)):
-            out.append((self.high[i] - self.low[i]) * (self.tanh(x[:, i]) + 1)/2 + self.low[i])
-        return torch.stack(out, dim=1)
-
-        
 class QNet(nn.Module):
     def __init__(self, norm):
         super(QNet, self).__init__()
@@ -301,18 +292,18 @@ class QNet(nn.Module):
         self.tanh = nn.Tanh()
         self.act = nn.LeakyReLU(0.2)
 
-    def forward(self, x1, x2):
-        x1 = self.norm.normalize(x1)
-        x = torch.cat([x1,x2],dim=1)
+    def forward(self, state, al):
+        sl = self.norm.normalize(state)
+        x = torch.cat([sl,al],dim=1)
         x = self.act(self.fc1(x))
         x = self.act(self.fc2(x))
-        x = self.act(self.fc3(x))
+        #x = self.act(self.fc3(x))
         #x = self.act(self.fc4(x))
         #x = self.act(self.fc5(x))
         #print("tanh:",self.tanh(self.out(x))[0].item())
-        out = self.tanh(self.out(x))/(1-γ)
+        Q = self.tanh(self.out(x))/(1-γ)
         #print("out:",out[0].item())
-        return out
+        return Q
 
 class PNet(nn.Module):
     def __init__(self, norm):
@@ -335,7 +326,7 @@ class PNet(nn.Module):
         
 
     def forward(self, x1, x2):
-        x1 = self.norm.normalize(x1)
+        #x1 = self.norm.normalize(x1)
         x = torch.cat([x1,x2],dim=1)
         x = self.act(self.fc1(x))
         x = self.act(self.fc2(x))
@@ -343,7 +334,7 @@ class PNet(nn.Module):
         #x = self.act(self.fc4(x))
         #x = self.act(self.fc5(x))
         x = self.out(x)
-        out = self.norm.denormalize(x)
+        #out = self.norm.denormalize(x)
         return out
 
 class TD3(Policy):
@@ -356,26 +347,26 @@ class TD3(Policy):
         self.actions = actions
         self.action_data = None
         self.device = device
-        self.high = actions.space.high
-        self.low = actions.space.low
+        self.high = torch.tensor(actions.space.high, device=self.device)
+        self.low = torch.tensor(actions.space.low, device=self.device)
         print(self.high, self.low)
         self.norm = Normalizer(N_STATES,1e3, device)
-        self.μ = μNet(self.high,self.low, self.norm)
+        self.μ = μNet(self.norm)
         self.μ.to(device)
         self.Q1, self.Q2 = QNet(self.norm), QNet(self.norm)
         self.Q1.to(self.device)
         self.Q2.to(self.device)
-        self.P = PNet(self.norm)
-        self.P.to(device)
+        #self.P = PNet(self.norm)
+        #self.P.to(device)
         trainableμ = list(filter(lambda p: p.requires_grad, self.μ.parameters()))
         self.optimμ = torch.optim.Adam(trainableμ, lr=LR)
         trainableQ1 = list(filter(lambda p: p.requires_grad, self.Q1.parameters()))
         self.optimQ1 = torch.optim.Adam(trainableQ1, lr=LR)
         trainableQ2 = list(filter(lambda p: p.requires_grad, self.Q2.parameters()))
         self.optimQ2 = torch.optim.Adam(trainableQ2, lr=LR)
-        trainableP = list(filter(lambda p: p.requires_grad, self.P.parameters()))
-        self.optimP = torch.optim.Adam(trainableP, lr=LR)
-        self.μ_tar = μNet(self.high,self.low, self.norm)
+        #trainableP = list(filter(lambda p: p.requires_grad, self.P.parameters()))
+        #self.optimP = torch.optim.Adam(trainableP, lr=LR)
+        self.μ_tar = μNet(self.norm)
         self.Q1_tar, self.Q2_tar = QNet(self.norm), QNet(self.norm)
         self.μ_tar.to(device)
         self.Q1_tar.to(self.device)
@@ -384,7 +375,7 @@ class TD3(Policy):
         self.Q1_tar.load_state_dict(self.Q1.state_dict())
         self.Q2_tar.load_state_dict(self.Q2.state_dict())
 
-        self.meta_reward = lambda s,a,s_: intrinsic_counting_reward(s_,a) * β + torch.mean((self.P(s, a)-s_)**2)* p_ratio
+        self.meta_reward = lambda s,a,s_: intrinsic_counting_reward(s_,a) * β #+ torch.mean((self.P(s, a)-s_)**2)* p_ratio
         self.replay_buffer = ReplayBuffer(BUFFER_SIZE,N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, self.meta_reward, False, device, device)
         self.meta_replay_buffer = ReplayBuffer(int(start_timesteps/t_episode)+1, N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, self.meta_reward, True, device, device)
         self.cnt_step = 0
@@ -420,7 +411,8 @@ class TD3(Policy):
 
         #with torch.no_grad():
         #    ai_ = self.μ_tar(st_)
-        #    ai_ = ai_.clamp(-self.max_action, self.max_action)
+        #    for i in range(len(self.high)):
+        #        ai_[:, i] = ai_[:, i].clamp(-self.low[i], self.high[i])
         #
         #    Q1_ = self.Q1_tar(st_,ai_)
         #    Q2_ = self.Q2_tar(st_,ai_)
@@ -460,12 +452,18 @@ class TD3(Policy):
             lq1, lq2 = self.update_critic(s,a,r,mask,s_)
             self.lossQ1 += lq1
             self.lossQ2 += lq2
-            self.rt_p = self.update_physical_predictor(s, a, s_).item()
+            #self.rt_p = self.update_physical_predictor(s, a, s_).item()
         
         if self.cnt_step % DELAY_ACTOR_STEPS == 0:
             self.lossμ += self.update_actor(s)
         return
             
+    def action_logits(self, a):
+        # rescale action to [-1,1]
+        return 2*(a - self.low)/(self.high - self.low) - 1
+
+    def logits_action(self, al):
+        return (al+1) * (self.high - self.low)/2 + self.low
         
     def get_action(self, st):
         # cast to numpy
@@ -474,10 +472,16 @@ class TD3(Policy):
         else:
             # compute action with actor μ
             with torch.no_grad():
-                at = self.μ(st)
+                alt = self.μ(st)
+            noise = (torch.randn_like(alt) * NOISE_SCALE).clamp(-NOISE_CLIP, NOISE_CLIP)
+            alt += noise
+            alt = alt.clamp(-1,1)
+            at = self.logits_action(alt)
             #for i in range(len(self.high)):
             #    at[:, i] = at[:, i].clamp(-self.low[i], self.high[i])
             at_np = at.detach().cpu().numpy()[0]
+            #print("{:d}".format(self.cnt_step % t_episode))
+            #print(at_np)
         return at_np
         
     def update_physical_predictor(self, s, a, s_):
@@ -489,11 +493,11 @@ class TD3(Policy):
         return lossP * p_ratio
 
     def update_actor(self, si):
-        ai = self.μ(si)
-        Q1 = self.Q1(si, ai)
-        lossμ = -torch.mean(Q1) + ACTION_L2 * torch.mean(ai**2)
+        ali = self.μ(si)
+        Q1 = self.Q1(si, ali)
+        lossμ = -torch.mean(Q1)# + ACTION_L2 * torch.mean(ali**2)
         lossμ.backward()
-        #print("fcn layer grad:",self.μ.fcn.weight.grad)
+        #print("out layer grad:",self.μ.out.weight.grad)
         #print("fcn layer:",self.μ.fcn.weight)
         self.optimμ.step()
         self.optimμ.zero_grad()
@@ -508,19 +512,17 @@ class TD3(Policy):
         #print("ri:",ri)
         #print("mask:",mask[0])
         with torch.no_grad():
-            ai_ = self.μ_tar(si_)
-            noise = (torch.randn_like(ai_) * NOISE_SCALE).clamp(-NOISE_CLIP, NOISE_CLIP)
-            ai_ += noise
-            for i in range(len(self.high)):
-                ai_[:, i] = ai_[:, i].clamp(-self.low[i], self.high[i])
+            ali_ = self.μ_tar(si_)
         
-            Q1_ = self.Q1_tar(si_,ai_)
-            Q2_ = self.Q2_tar(si_,ai_)
+            Q1_ = self.Q1_tar(si_,ali_)
+            Q2_ = self.Q2_tar(si_,ali_)
             y = ri + mask * torch.min(Q1_, Q2_)
         #    print("Q_:",torch.min(Q1_, Q2_)[0])
 
         #print("Q*:",y)
-        Q1 = self.Q1(si, ai) 
+        ali = self.action_logits(ai)
+
+        Q1 = self.Q1(si, ali) 
         #print("Q1:",Q1,flush=True)
         lossQ1 = torch.mean((y-Q1)**2)
         lossQ1.backward()
@@ -529,7 +531,7 @@ class TD3(Policy):
         self.optimQ1.zero_grad()
         self.optimQ2.zero_grad()
 
-        Q2 = self.Q2(si, ai)
+        Q2 = self.Q2(si, ali)
         lossQ2 = torch.mean((y-Q2)**2)
         lossQ2.backward()
         self.optimQ2.step()
@@ -566,7 +568,7 @@ if __name__=="__main__":
     STATES_SHAPE = [i.shape[0] for i in states()]
     print(STATES_SHAPE)
     N_STATES = sum(STATES_SHAPE)
-    action = JointPositionChangeAction(manipulator)
+    action = JointPositionAction(manipulator)
     N_ACTIONS = action.space.sample().shape[0]
     print(N_ACTIONS)
     env = Env(world, states,actions=action)
