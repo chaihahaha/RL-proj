@@ -3,7 +3,7 @@ from pyrobolearn.envs import Env
 from pyrobolearn.policies import Policy
 from pyrobolearn.states.body_states import DistanceState, PositionState, VelocityState
 from pyrobolearn.states import JointPositionState, JointVelocityState, LinkWorldPositionState, LinkWorldVelocityState
-from pyrobolearn.actions import JointPositionAction
+from pyrobolearn.actions import JointPositionChangeAction
 from pyrobolearn.terminal_conditions import TerminalCondition
 
 import torch
@@ -25,7 +25,7 @@ N_BATCHES = 4
 TARGET_REPLACE_STEPS = 200
 DELAY_ACTOR_STEPS = 400
 DELAY_CRITIC_STEPS = 200
-polyak = 0.23
+polyak = 0.20
 t_episode = 200
 γ = 0.998
 start_timesteps = 1e4
@@ -580,7 +580,7 @@ if __name__=="__main__":
     states = LinkWorldVelocityState(manipulator, link_ids=end_effector) + LinkWorldPositionState(manipulator, link_ids=other_links)  + LinkWorldVelocityState(manipulator, link_ids=other_links) + LinkWorldPositionState(manipulator, link_ids=end_effector) + PositionState(box,world)
     STATES_SHAPE = [i.shape[0] for i in states()]
     N_STATES = sum(STATES_SHAPE)
-    action = JointPositionAction(manipulator)
+    action = JointPositionChangeAction(manipulator)
     N_ACTIONS = action.space.sample().shape[0]
     env = Env(world, states,actions=action)
     
