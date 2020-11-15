@@ -20,7 +20,7 @@ t_episode = 100
 
 class TD3_test(TD3):
     def __init__(self, env, states, actions, robot, reward, device):
-        super(TD3_test, self).__init__(self, env, states, actions, robot, reward, device)
+        super(TD3_test, self).__init__(env, states, actions, robot, reward, device)
 
     def learn(self):
         # get state $s_t$
@@ -28,14 +28,13 @@ class TD3_test(TD3):
         
         # get action $a_t$
         at_np = self.get_action(st)
-        at = torch.tensor(at_np, device=self.device).unsqueeze(0)
 
         # apply action
         self.set_action_data(at_np)
         self.actions()
         
         # step in environment to get next state $s_{t+1}$, reward $r_t$
-        self.env.step(1/240.0)
+        self.env.step(sleep_dt=1/140.0)
         # take last but one state as achieved goal, take last state as desired goal
 
         return 
@@ -65,20 +64,18 @@ if __name__=="__main__":
     other_links = manipulator.get_end_effector_ids()[:-1] + manipulator.get_link_ids()
     states = LinkWorldVelocityState(manipulator, link_ids=end_effector) + LinkWorldPositionState(manipulator, link_ids=other_links)  + LinkWorldVelocityState(manipulator, link_ids=other_links) + LinkWorldPositionState(manipulator, link_ids=end_effector) + PositionState(box,world)
     STATES_SHAPE = [i.shape[0] for i in states()]
-    print(STATES_SHAPE)
     N_STATES = sum(STATES_SHAPE)
     action = JointPositionAction(manipulator)
     N_ACTIONS = action.space.sample().shape[0]
-    print(N_ACTIONS)
     env = Env(world, states,actions=action)
     
     env.reset()
     
     hashtable = HashTable(LSH_K, N_STATES+N_ACTIONS)
-    td3 = TD3(env, states, action,manipulator,touched_reward, "cuda")
+    td3 = TD3_test(env, states, action,manipulator,touched_reward, "cuda")
     
     print("Loading model...")
-    td3.load("td3.ckpt", "norm.pickle")
+    td3.load("td3_test.ckpt", "norm.pickle")
     
     for i in count(start=1):
         # randomly reset robot joint and box position

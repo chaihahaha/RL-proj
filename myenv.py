@@ -240,7 +240,7 @@ class Normalizer(object):
         return x
 
 class μNet(nn.Module):
-    def __init__(self, norm):
+    def __init__(self, norm, N_STATES, N_ACTIONS):
         super(μNet, self).__init__()
         self.norm = norm
         self.fc1 = nn.Linear(N_STATES, 10)
@@ -275,7 +275,7 @@ class μNet(nn.Module):
         return al
 
 class QNet(nn.Module):
-    def __init__(self, norm):
+    def __init__(self, norm, N_STATES, N_ACTIONS):
         super(QNet, self).__init__()
         self.norm = norm
         self.fc1 = nn.Linear(N_STATES + N_ACTIONS, 40)
@@ -307,7 +307,7 @@ class QNet(nn.Module):
         return Q
 
 class PNet(nn.Module):
-    def __init__(self, norm):
+    def __init__(self, norm, N_STATES, N_ACTIONS):
         super(PNet, self).__init__()
         self.norm = norm
         self.fc1 = nn.Linear(N_STATES+N_ACTIONS, 20)
@@ -341,6 +341,12 @@ class PNet(nn.Module):
 class TD3(Policy):
     def __init__(self, env, states, actions, robot, reward, device):
         super(TD3, self).__init__(states, actions)
+        STATES_SHAPE = [i.shape[0] for i in states()]
+        print(STATES_SHAPE)
+        N_STATES = sum(STATES_SHAPE)
+        N_ACTIONS = actions.space.sample().shape[0]
+        print(N_ACTIONS)
+
         self.robot = robot
         self.reward = reward
         self.env = env
@@ -352,9 +358,9 @@ class TD3(Policy):
         self.low = torch.tensor(actions.space.low, device=self.device)
         print(self.high, self.low)
         self.norm = Normalizer(N_STATES,1e3, device)
-        self.μ = μNet(self.norm)
+        self.μ = μNet(self.norm, N_STATES, N_ACTIONS)
         self.μ.to(device)
-        self.Q1, self.Q2 = QNet(self.norm), QNet(self.norm)
+        self.Q1, self.Q2 = QNet(self.norm, N_STATES, N_ACTIONS), QNet(self.norm, N_STATES, N_ACTIONS)
         self.Q1.to(self.device)
         self.Q2.to(self.device)
         #self.P = PNet(self.norm)
@@ -367,8 +373,8 @@ class TD3(Policy):
         self.optimQ2 = torch.optim.Adam(trainableQ2, lr=LR)
         #trainableP = list(filter(lambda p: p.requires_grad, self.P.parameters()))
         #self.optimP = torch.optim.Adam(trainableP, lr=LR)
-        self.μ_tar = μNet(self.norm)
-        self.Q1_tar, self.Q2_tar = QNet(self.norm), QNet(self.norm)
+        self.μ_tar = μNet(self.norm, N_STATES, N_ACTIONS)
+        self.Q1_tar, self.Q2_tar = QNet(self.norm, N_STATES, N_ACTIONS), QNet(self.norm, N_STATES, N_ACTIONS)
         self.μ_tar.to(device)
         self.Q1_tar.to(self.device)
         self.Q2_tar.to(self.device)
@@ -559,6 +565,7 @@ class TD3(Policy):
         self.Q2_tar.load_state_dict(state_dicts['Q2'])
         with open(normfile, "rb") as f:
             self.norm = pickle.load(f)
+            self.μ.norm = self.norm
 
 def success(reward):
     return reward >= -0.5
@@ -572,11 +579,8 @@ if __name__=="__main__":
     other_links = manipulator.get_end_effector_ids()[:-1] + manipulator.get_link_ids()
     states = LinkWorldVelocityState(manipulator, link_ids=end_effector) + LinkWorldPositionState(manipulator, link_ids=other_links)  + LinkWorldVelocityState(manipulator, link_ids=other_links) + LinkWorldPositionState(manipulator, link_ids=end_effector) + PositionState(box,world)
     STATES_SHAPE = [i.shape[0] for i in states()]
-    print(STATES_SHAPE)
     N_STATES = sum(STATES_SHAPE)
-    action = JointPositionAction(manipulator)
-    N_ACTIONS = action.space.sample().shape[0]
-    print(N_ACTIONS)
+    N_ACTIONS = actions.space.sample().shape[0]
     env = Env(world, states,actions=action)
     
     env.reset()
