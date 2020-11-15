@@ -580,7 +580,8 @@ if __name__=="__main__":
     states = LinkWorldVelocityState(manipulator, link_ids=end_effector) + LinkWorldPositionState(manipulator, link_ids=other_links)  + LinkWorldVelocityState(manipulator, link_ids=other_links) + LinkWorldPositionState(manipulator, link_ids=end_effector) + PositionState(box,world)
     STATES_SHAPE = [i.shape[0] for i in states()]
     N_STATES = sum(STATES_SHAPE)
-    N_ACTIONS = actions.space.sample().shape[0]
+    action = JointPositionAction(manipulator)
+    N_ACTIONS = action.space.sample().shape[0]
     env = Env(world, states,actions=action)
     
     env.reset()
