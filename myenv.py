@@ -18,21 +18,22 @@ BUFFER_SIZE = int(3e2) # if use intrinsic reward, less memory will encourage for
 RAND_EPSILON = 0.3
 NOISE_CLIP = 0.5
 NOISE_SCALE = 0.2
-ACTION_L2 = 0.0
+ACTION_L2 = 1e-3
 LR = 1e-3
 BATCH_SIZE = 256
 N_BATCHES = 4
 TARGET_REPLACE_STEPS = 200
 DELAY_ACTOR_STEPS = 400
 DELAY_CRITIC_STEPS = 200
-polyak = 0.20
+polyak = 0.21
 t_episode = 200
 γ = 0.998
 start_timesteps = 1e4
 REPLAY_K = 4
 LSH_K = 18
-β = 2e-3
-p_ratio = 2e-5
+β = 2e-2
+p_ratio = 2e-4
+sim_ratio = 10
 
 def picked_and_lifted_reward(box_pos):
     assert len(box_pos) == 3
@@ -59,7 +60,7 @@ def intrinsic_counting_reward(state, action):
     return (freq + 1)**(-0.5)
         
 class ReplayBuffer(object):
-    def __init__(self, size, obs_dim, ag_dim, dg_dim, a_dim, r_dim, mask_dim, t_episode, replay_k, reward,meta_reward, meta,device,odevice):
+    def __init__(self, size, obs_dim, ag_dim, dg_dim, a_dim, r_dim, mask_dim, t_episode, replay_k, reward, meta,device,odevice):
         self.device = device
         self.odevice = odevice
         self.reward = reward
@@ -76,16 +77,15 @@ class ReplayBuffer(object):
         
         self.a = torch.zeros((size,t_episode, a_dim), device=device)
         
-        #self.r = torch.zeros((size,t_episode, r_dim), device=device)
+        self.r_in = torch.zeros((size,t_episode, r_dim), device=device)
         
         self.mask = torch.zeros((size,t_episode, mask_dim), device=device)
         self.future_p = 1 - (1. / (1 + replay_k))
         self.cnt = 0
 
         self.meta = meta
-        self.meta_reward = meta_reward
         
-    def store(self, s, a, mask, s_):
+    def store(self, s, a, r_in, mask, s_):
         s, a, mask, s_ = torch.tensor(s),torch.tensor(a),torch.tensor(mask),torch.tensor(s_)
         s, a, mask, s_ = s.to(self.device).reshape(-1), a.to(self.device).reshape(-1), mask.to(self.device), s_.to(self.device).reshape(-1)
         s, s_ = s.detach(), s_.detach()
@@ -96,7 +96,7 @@ class ReplayBuffer(object):
         self.sdg[index,t_step] = s[-self.dg_dim:]
         
         self.a[index,t_step] = torch.tensor(a)
-        #self.r[index,t_step] = torch.tensor(r)
+        self.r_in[index,t_step] = torch.tensor(r_in)
         
         self.mask[index,t_step] = mask
         
@@ -118,10 +118,10 @@ class ReplayBuffer(object):
         sdg = self.sdg[episode_idxs, t_samples].clone()
         
         a = self.a[episode_idxs, t_samples].clone()
-        #r = self.r[episode_idxs, t_samples].clone()
+        r_in = self.r_in[episode_idxs, t_samples].clone()
+        r_env = torch.zeros_like(r_in)
         
         mask = self.mask[episode_idxs, t_samples].clone()
-        r = torch.zeros_like(mask)
         
         s_obs = self.s_obs[episode_idxs, t_samples].clone()
         s_ag = self.s_ag[episode_idxs, t_samples].clone()
@@ -159,13 +159,10 @@ class ReplayBuffer(object):
         
         s = torch.cat([sobs, sag, sdg], 1)
         s_ = torch.cat([s_obs, s_ag, s_dg], 1)
-        for i in range(len(r)):
-            si,ai,s_i = s[i].unsqueeze(0), a[i].unsqueeze(0), s_[i].unsqueeze(0)
-            r[i] = self.meta_reward(si, ai, s_i)
         if not self.meta:
-            r += self.reward(s_ag, s_dg)
+            r_env = self.reward(s_ag, s_dg)
         else:
-            r += -1
+            r_in += -1
         #print("==========after=========")
         #print("sobs sag sdg")
         #print(sobs,sag,sdg)
@@ -174,6 +171,8 @@ class ReplayBuffer(object):
         #print("s_obs s_ag s_dg")
         #print(s_obs,s_ag,s_dg)
         
+        r = r_env + r_in
+        assert r.shape[1] == 1
         s, a, r, mask, s_ = s.to(self.odevice), a.to(self.odevice), r.to(self.odevice), mask.to(self.odevice), s_.to(self.odevice)
         return s, a, r, mask, s_
         
@@ -382,9 +381,9 @@ class TD3(Policy):
         self.Q1_tar.load_state_dict(self.Q1.state_dict())
         self.Q2_tar.load_state_dict(self.Q2.state_dict())
 
-        self.meta_reward = lambda s,a,s_: intrinsic_counting_reward(s_,a) * β #+ torch.mean((self.P(s, a)-s_)**2)* p_ratio
-        self.replay_buffer = ReplayBuffer(BUFFER_SIZE,N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, self.meta_reward, False, device, device)
-        self.meta_replay_buffer = ReplayBuffer(int(start_timesteps/t_episode)+1, N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, self.meta_reward, True, device, device)
+        self.lsh_reward = lambda s,a,s_: intrinsic_counting_reward(s_,a) * β #+ torch.mean((self.P(s, a)-s_)**2)* p_ratio
+        self.replay_buffer = ReplayBuffer(BUFFER_SIZE,N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, False, device, device)
+        self.meta_replay_buffer = ReplayBuffer(int(start_timesteps/t_episode)+1, N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, True, device, device)
         self.cnt_step = 0
         self.lossμ, self.lossQ1, self.lossQ2 = 0,0,0
 
@@ -404,9 +403,10 @@ class TD3(Policy):
         self.actions()
         
         # step in environment to get next state $s_{t+1}$, reward $r_t$
+        tik = time.time()
         st_, _, _, info = self.env.step()
+        tok = time.time()
         st_ = torch.tensor(st_, dtype=torch.float,device=self.device).unsqueeze(0)
-
 
         # add to hash table and compute intrinsic reward
         hashtable.add(st_, at)
@@ -415,6 +415,9 @@ class TD3(Policy):
         sag = torch.tensor(self.states()[-2]).unsqueeze(0)
         sdg = torch.tensor(self.states()[-1]).unsqueeze(0)
         rt_env = self.reward(sag, sdg)[0].item()
+        rt_lsh = self.lsh_reward(st, at, st_)
+        rt_sim = (tok - tik) * sim_ratio
+        rt_in = rt_env + rt_lsh + rt_sim
 
         #with torch.no_grad():
         #    ai_ = self.μ_tar(st_)
@@ -428,10 +431,10 @@ class TD3(Policy):
         #    print("epi{:d}".format(self.cnt_step//t_episode),flush=True)
         #print("Q:{:.3f}\tQ*:{:.3f}\trt:{:.3f}".format(q.item(),Q1_.item(),rt_env))
         
-        self.replay_buffer.store(st, at, 0. if done else γ, st_)
+        self.replay_buffer.store(st, at, rt_in, 0. if done else γ, st_)
         # keep (st, at, rt_in, st_) in meta training buffer
         if self.cnt_step < start_timesteps:
-            self.meta_replay_buffer.store(st, at, 0. if done else γ, st_)
+            self.meta_replay_buffer.store(st, at, rt_in, 0. if done else γ, st_)
         
         if train:
             if self.cnt_step > 2*t_episode and (self.cnt_step % DELAY_CRITIC_STEPS == 0 or self.cnt_step % DELAY_ACTOR_STEPS == 0):
@@ -442,7 +445,7 @@ class TD3(Policy):
                 self.update_target()
             
         self.cnt_step += 1
-        return rt_env, self.lossμ*(DELAY_ACTOR_STEPS//t_episode)/N_BATCHES, self.lossQ1*(DELAY_CRITIC_STEPS//t_episode)/N_BATCHES, self.lossQ2*(DELAY_CRITIC_STEPS//t_episode)/N_BATCHES
+        return rt_env,rt_lsh,rt_sim, self.lossμ*(DELAY_ACTOR_STEPS//t_episode)/N_BATCHES, self.lossQ1*(DELAY_CRITIC_STEPS//t_episode)/N_BATCHES, self.lossQ2*(DELAY_CRITIC_STEPS//t_episode)/N_BATCHES
         
     def update_target(self):
         update_pairs = [(self.μ, self.μ_tar), (self.Q1, self.Q1_tar), (self.Q2, self.Q2_tar)]
@@ -503,7 +506,7 @@ class TD3(Policy):
     def update_actor(self, si):
         ali = self.μ(si)
         Q1 = self.Q1(si, ali)
-        lossμ = -torch.mean(Q1)# + ACTION_L2 * torch.mean(ali**2)
+        lossμ = -torch.mean(Q1) + ACTION_L2 * torch.mean(ali**2)
         lossμ.backward()
         #print("out layer grad:",self.μ.out.weight.grad)
         #print("fcn layer:",self.μ.fcn.weight)
@@ -596,6 +599,8 @@ if __name__=="__main__":
     n_cycles = 10
     n_success = 0
     s_reward = 0
+    s_lsh = 0
+    s_sim = 0
     sum_lossμ = 0
     sum_lossQ1 = 0
     sum_lossQ2 = 0
@@ -608,23 +613,27 @@ if __name__=="__main__":
         # run an episode
         for t in range(t_episode):
             done = (t >= t_episode - 1)
-            reward, lossμ, lossQ1, lossQ2 = td3.learn(done, train=True)
+            reward,r_lsh,r_sim, lossμ, lossQ1, lossQ2 = td3.learn(done, train=True)
             sum_lossμ += lossμ
             sum_lossQ1 += lossQ1
             sum_lossQ2 += lossQ2
             s_reward += reward
+            s_lsh += r_lsh
+            s_sim += r_sim
         n_success += 1 if success(reward) else 0
         #print("SUCCESS" if done else "FAIL",flush=True)
         
         # collect statistics of #n_cycles results
         if i%n_cycles==0:
             tok = time.time()
-            print("Epoch {:5d}\tSuc rate: {:.2f}\tAvg reward: {:.2f}\tLossμ:{:.3f}\tLossQ1:{:.3f}\tLossQ2:{:.3f}\tTime: {:.1f}".format(int(i/n_cycles),n_success/n_cycles,s_reward/n_cycles,sum_lossμ/n_cycles, sum_lossQ1/n_cycles, sum_lossQ2/n_cycles, tok-tik),flush=True)
+            print("Epoch {:5d}\tSuc rate: {:.2f}\tAvg reward: {:.2f}\tLSH reward: {:.5f}\tSim reward: {:.5f}\tLossμ:{:.3f}\tLossQ1:{:.3f}\tLossQ2:{:.3f}\tTime: {:.1f}".format(int(i/n_cycles),n_success/n_cycles,s_reward/n_cycles,s_lsh/n_cycles, s_sim/n_cycles, sum_lossμ/n_cycles, sum_lossQ1/n_cycles, sum_lossQ2/n_cycles, tok-tik),flush=True)
             sum_lossμ = 0
             sum_lossQ1 = 0
             sum_lossQ2 = 0
             n_success = 0
             s_reward = 0
+            s_lsh = 0
+            s_sim = 0
             tik = time.time()
         if i%save_freq==0:
 #            print("Saving model...")
