@@ -12,6 +12,7 @@ import torch.nn as nn
 import numpy as np
 import time
 from itertools import count
+import pickle
 
 BUFFER_SIZE = int(3e2) # if use intrinsic reward, less memory will encourage forgetting false rt_in
 RAND_EPSILON = 0.3
@@ -381,7 +382,7 @@ class TD3(Policy):
         self.cnt_step = 0
         self.lossμ, self.lossQ1, self.lossQ2 = 0,0,0
 
-    def learn(self, done):
+    def learn(self, done, train=True):
         self.lossμ, self.lossQ1, self.lossQ2 = 0,0,0
         
         # get state $s_t$
@@ -426,12 +427,13 @@ class TD3(Policy):
         if self.cnt_step < start_timesteps:
             self.meta_replay_buffer.store(st, at, 0. if done else γ, st_)
         
-        if self.cnt_step > 2*t_episode and (self.cnt_step % DELAY_CRITIC_STEPS == 0 or self.cnt_step % DELAY_ACTOR_STEPS == 0):
-            for _ in range(N_BATCHES):
-                self.train()
-            
-        if self.cnt_step % TARGET_REPLACE_STEPS == 0:
-            self.update_target()
+        if train:
+            if self.cnt_step > 2*t_episode and (self.cnt_step % DELAY_CRITIC_STEPS == 0 or self.cnt_step % DELAY_ACTOR_STEPS == 0):
+                for _ in range(N_BATCHES):
+                    self.train()
+                
+            if self.cnt_step % TARGET_REPLACE_STEPS == 0:
+                self.update_target()
             
         self.cnt_step += 1
         return rt_env, self.lossμ*(DELAY_ACTOR_STEPS//t_episode)/N_BATCHES, self.lossQ1*(DELAY_CRITIC_STEPS//t_episode)/N_BATCHES, self.lossQ2*(DELAY_CRITIC_STEPS//t_episode)/N_BATCHES
@@ -540,12 +542,14 @@ class TD3(Policy):
         self.optimQ2.zero_grad()
         return lossQ1.item(),lossQ2.item()
 
-    def save(self, filename):
+    def save(self, filename, normfile):
         torch.save({'μ':self.μ_tar.state_dict(),
                     'Q1':self.Q1_tar.state_dict(),
                     'Q2':self.Q2_tar.state_dict()}, filename)
+        with open(normfile, "wb") as f:
+            pickle.dump(self.norm, f)
     
-    def load(self, filename):
+    def load(self, filename, normfile):
         state_dicts = torch.load(filename)
         self.μ.load_state_dict(state_dicts['μ'])
         self.Q1.load_state_dict(state_dicts['Q1'])
@@ -553,6 +557,8 @@ class TD3(Policy):
         self.μ_tar.load_state_dict(state_dicts['μ'])
         self.Q1_tar.load_state_dict(state_dicts['Q1'])
         self.Q2_tar.load_state_dict(state_dicts['Q2'])
+        with open(normfile, "rb") as f:
+            self.norm = pickle.load(f)
 
 def success(reward):
     return reward >= -0.5
@@ -579,7 +585,7 @@ if __name__=="__main__":
     td3 = TD3(env, states, action,manipulator,touched_reward, "cuda")
     
 #    print("Loading model...")
-#    td3.load("td3.ckpt")
+#    td3.load("td3.ckpt", "norm.pickle")
     save_freq = 200
     
     n_cycles = 10
@@ -597,7 +603,7 @@ if __name__=="__main__":
         # run an episode
         for t in range(t_episode):
             done = (t >= t_episode - 1)
-            reward, lossμ, lossQ1, lossQ2 = td3.learn(done)
+            reward, lossμ, lossQ1, lossQ2 = td3.learn(done, train=True)
             sum_lossμ += lossμ
             sum_lossQ1 += lossQ1
             sum_lossQ2 += lossQ2
@@ -617,7 +623,7 @@ if __name__=="__main__":
             tik = time.time()
         if i%save_freq==0:
 #            print("Saving model...")
-            td3.save("td3.ckpt")
+            td3.save("td3.ckpt", "norm.pickle")
 #    for i in count():
 #        obs,reward,done,info = env.step()
 #        print(reward)

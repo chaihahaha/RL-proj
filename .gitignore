@@ -3,3 +3,5 @@ log
 *.ckpt
 *.txt
 *.swp
+*.pickle
+__pycache__
