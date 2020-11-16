@@ -135,34 +135,35 @@ class ReplayBuffer(object):
         #print("s_obs s_ag s_dg")
         #print(s_obs,s_ag,s_dg)
 
-        # Select future time indexes proportional with probability future_p. These
-        # will be used for HER replay by substituting in future goals.
-        her_indexes = np.where(np.random.uniform(size=batch_size) < self.future_p)
-        future_offset = np.random.uniform(size=batch_size) * (self.t_episode - t_samples)
-        future_offset = future_offset.astype(int)
-        future_t = (t_samples + future_offset)[her_indexes]
+        if not self.meta:
+            # Hindsight Experience Replay
+            # Select future time indexes proportional with probability future_p. These
+            # will be used for HER replay by substituting in future goals.
+            her_indexes = np.where(np.random.uniform(size=batch_size) < self.future_p)
+            future_offset = np.random.uniform(size=batch_size) * (self.t_episode - t_samples)
+            future_offset = future_offset.astype(int)
+            future_t = (t_samples + future_offset)[her_indexes]
 
-        # Replace goal with achieved goal but only for the previously-selected
-        # HER transitions (as defined by her_indexes). For the other transitions,
-        # keep the original goal.
-        #print("t_samples")
-        #print(t_samples)
-        #print("future_offset")
-        #print(future_offset)
-        #print("her_indexes, future_t")
-        #print(her_indexes, future_t)
-        future_ag = self.sag[episode_idxs[her_indexes], future_t]
-        #print("future_ag")
-        #print(future_ag)
-        sdg[her_indexes] = future_ag
-        s_dg[her_indexes] = future_ag
+            # Replace goal with achieved goal but only for the previously-selected
+            # HER transitions (as defined by her_indexes). For the other transitions,
+            # keep the original goal.
+            #print("t_samples")
+            #print(t_samples)
+            #print("future_offset")
+            #print(future_offset)
+            #print("her_indexes, future_t")
+            #print(her_indexes, future_t)
+            future_ag = self.sag[episode_idxs[her_indexes], future_t]
+            #print("future_ag")
+            #print(future_ag)
+            sdg[her_indexes] = future_ag
+            s_dg[her_indexes] = future_ag
+            r_env = self.reward(s_ag, s_dg)
+        else:
+            r_in += -1 
         
         s = torch.cat([sobs, sag, sdg], 1)
         s_ = torch.cat([s_obs, s_ag, s_dg], 1)
-        if not self.meta:
-            r_env = self.reward(s_ag, s_dg)
-        else:
-            r_in += -1
         #print("==========after=========")
         #print("sobs sag sdg")
         #print(sobs,sag,sdg)
