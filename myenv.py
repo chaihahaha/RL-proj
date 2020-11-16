@@ -25,7 +25,7 @@ N_BATCHES = 4
 TARGET_REPLACE_STEPS = 200
 DELAY_ACTOR_STEPS = 400
 DELAY_CRITIC_STEPS = 200
-polyak = 0.21
+polyak = 0.23
 t_episode = 200
 γ = 0.998
 start_timesteps = 1e4
@@ -417,7 +417,7 @@ class TD3(Policy):
         rt_env = self.reward(sag, sdg)[0].item()
         rt_lsh = self.lsh_reward(st, at, st_)
         rt_sim = (tok - tik) * sim_ratio
-        rt_in = rt_env + rt_lsh + rt_sim
+        rt_in = rt_lsh + rt_sim
 
         #with torch.no_grad():
         #    ai_ = self.μ_tar(st_)
