@@ -17,7 +17,7 @@ import pickle
 BUFFER_SIZE = int(3e2) # if use intrinsic reward, less memory will encourage forgetting false rt_in
 RAND_EPSILON = 0.3
 NOISE_CLIP = 0.5
-NOISE_SCALE = 0.2
+#NOISE_SCALE = 0.2
 ACTION_L2 = 1e-3
 LR = 1e-3
 BATCH_SIZE = 256
@@ -269,8 +269,8 @@ class μNet(nn.Module):
         #x = self.act(self.fc4(x))
         #x = self.act(self.fc5(x))
         x = self.out(x)
-        #noise = self.fcn(torch.rand_like(x)).clamp(-NOISE_CLIP, NOISE_CLIP)
-        #x += noise
+        noise = self.fcn(torch.rand_like(x)).clamp(-NOISE_CLIP, NOISE_CLIP)
+        x += noise
         al = self.tanh(x)
         return al
 
@@ -388,7 +388,7 @@ class TD3(Policy):
         self.cnt_step = 0
         self.lossμ, self.lossQ1, self.lossQ2 = 0,0,0
 
-    def learn(self, done, train=True):
+    def learn(self, done):
         self.lossμ, self.lossQ1, self.lossQ2 = 0,0,0
         
         # get state $s_t$
@@ -437,13 +437,12 @@ class TD3(Policy):
         if self.cnt_step < start_timesteps:
             self.meta_replay_buffer.store(st, at, rt_in, 0. if done else γ, st_)
         
-        if train:
-            if self.cnt_step > 2*t_episode and (self.cnt_step % DELAY_CRITIC_STEPS == 0 or self.cnt_step % DELAY_ACTOR_STEPS == 0):
-                for _ in range(N_BATCHES):
-                    self.train()
-                
-            if self.cnt_step % TARGET_REPLACE_STEPS == 0:
-                self.update_target()
+        if self.cnt_step > 2*t_episode and (self.cnt_step % DELAY_CRITIC_STEPS == 0 or self.cnt_step % DELAY_ACTOR_STEPS == 0):
+            for _ in range(N_BATCHES):
+                self.train()
+            
+        if self.cnt_step % TARGET_REPLACE_STEPS == 0:
+            self.update_target()
             
         self.cnt_step += 1
         return rt_env,rt_lsh,rt_sim, self.lossμ*(DELAY_ACTOR_STEPS//t_episode)/N_BATCHES, self.lossQ1*(DELAY_CRITIC_STEPS//t_episode)/N_BATCHES, self.lossQ2*(DELAY_CRITIC_STEPS//t_episode)/N_BATCHES
@@ -485,9 +484,9 @@ class TD3(Policy):
             # compute action with actor μ
             with torch.no_grad():
                 alt = self.μ(st)
-            noise = (torch.randn_like(alt) * NOISE_SCALE).clamp(-NOISE_CLIP, NOISE_CLIP)
-            alt += noise
-            alt = alt.clamp(-1,1)
+            #noise = (torch.randn_like(alt) * NOISE_SCALE).clamp(-NOISE_CLIP, NOISE_CLIP)
+            #alt += noise
+            #alt = alt.clamp(-1,1)
             at = self.logits_action(alt)
             #for i in range(len(self.high)):
             #    at[:, i] = at[:, i].clamp(-self.low[i], self.high[i])
@@ -614,7 +613,7 @@ if __name__=="__main__":
         # run an episode
         for t in range(t_episode):
             done = (t >= t_episode - 1)
-            reward,r_lsh,r_sim, lossμ, lossQ1, lossQ2 = td3.learn(done, train=True)
+            reward,r_lsh,r_sim, lossμ, lossQ1, lossQ2 = td3.learn(done)
             sum_lossμ += lossμ
             sum_lossQ1 += lossQ1
             sum_lossQ2 += lossQ2

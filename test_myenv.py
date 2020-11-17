@@ -44,9 +44,6 @@ class TD3_test(TD3):
         # compute action with actor μ
         with torch.no_grad():
             alt = self.μ(st)
-        noise = (torch.randn_like(alt) * NOISE_SCALE).clamp(-NOISE_CLIP, NOISE_CLIP)
-        alt += noise
-        alt = alt.clamp(-1,1)
         at = self.logits_action(alt)
         #for i in range(len(self.high)):
         #    at[:, i] = at[:, i].clamp(-self.low[i], self.high[i])
