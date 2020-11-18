@@ -28,7 +28,7 @@ DELAY_CRITIC_STEPS = 200
 polyak = 0.23
 t_episode = 200
 γ = 0.998
-start_timesteps = 1e4
+start_timesteps = 1e5
 REPLAY_K = 4
 LSH_K = 18
 β = 2e-2
@@ -384,7 +384,7 @@ class TD3(Policy):
 
         self.lsh_reward = lambda s,a,s_: intrinsic_counting_reward(s_,a) * β #+ torch.mean((self.P(s, a)-s_)**2)* p_ratio
         self.replay_buffer = ReplayBuffer(BUFFER_SIZE,N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, False, device, device)
-        self.meta_replay_buffer = ReplayBuffer(int(start_timesteps/t_episode)+1, N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, True, device, device)
+        self.meta_replay_buffer = ReplayBuffer(BUFFER_SIZE, N_STATES-6, 3, 3, N_ACTIONS, 1, 1, t_episode, REPLAY_K, reward, True, device, device)
         self.cnt_step = 0
         self.lossμ, self.lossQ1, self.lossQ2 = 0,0,0
 
@@ -478,7 +478,7 @@ class TD3(Policy):
         
     def get_action(self, st):
         # cast to numpy
-        if np.random.uniform() < RAND_EPSILON or self.cnt_step < start_timesteps:
+        if np.random.uniform() < RAND_EPSILON:
             at_np = self.env.action.space.sample()
         else:
             # compute action with actor μ
