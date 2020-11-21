@@ -20,8 +20,8 @@ NOISE_CLIP = 0.5
 #NOISE_SCALE = 0.2
 ACTION_L2 = 1e-3
 LR = 1e-3
-BATCH_SIZE = 256
-N_BATCHES = 4
+BATCH_SIZE = 10000
+N_BATCHES = 1
 TARGET_REPLACE_STEPS = 200
 DELAY_ACTOR_STEPS = 400
 DELAY_CRITIC_STEPS = 200
@@ -243,9 +243,9 @@ class μNet(nn.Module):
     def __init__(self, norm, N_STATES, N_ACTIONS):
         super(μNet, self).__init__()
         self.norm = norm
-        self.fc1 = nn.Linear(N_STATES, 10)
+        self.fc1 = nn.Linear(N_STATES, 300)
         self.fc1.weight.data.normal_(0, 1e-3)   # initialization
-        self.fc2 = nn.Linear(10, 300)
+        self.fc2 = nn.Linear(300, 300)
         self.fc2.weight.data.normal_(0, 1e-3)   # initialization
         self.fc3 = nn.Linear(300, 300)
         self.fc3.weight.data.normal_(0, 1e-3)   # initialization
@@ -278,9 +278,9 @@ class QNet(nn.Module):
     def __init__(self, norm, N_STATES, N_ACTIONS):
         super(QNet, self).__init__()
         self.norm = norm
-        self.fc1 = nn.Linear(N_STATES + N_ACTIONS, 40)
+        self.fc1 = nn.Linear(N_STATES + N_ACTIONS, 300)
         self.fc1.weight.data.normal_(0, 1e-3)   # initialization
-        self.fc2 = nn.Linear(40, 300)
+        self.fc2 = nn.Linear(300, 300)
         self.fc2.weight.data.normal_(0, 1e-3)   # initialization
         self.fc3 = nn.Linear(300, 300)
         self.fc3.weight.data.normal_(0, 1e-3)   # initialization
@@ -310,9 +310,9 @@ class PNet(nn.Module):
     def __init__(self, norm, N_STATES, N_ACTIONS):
         super(PNet, self).__init__()
         self.norm = norm
-        self.fc1 = nn.Linear(N_STATES+N_ACTIONS, 20)
+        self.fc1 = nn.Linear(N_STATES+N_ACTIONS, 300)
         self.fc1.weight.data.normal_(0, 1e-3)   # initialization
-        self.fc2 = nn.Linear(20, 300)
+        self.fc2 = nn.Linear(300, 300)
         self.fc2.weight.data.normal_(0, 1e-3)   # initialization
         self.fc3 = nn.Linear(300, 300)
         self.fc3.weight.data.normal_(0, 1e-3)   # initialization
@@ -569,7 +569,6 @@ class TD3(Policy):
         with open(normfile, "rb") as f:
             self.norm = pickle.load(f)
             self.μ.norm = self.norm
-
 def success(reward):
     return reward >= -0.5
 
